@@ -27,8 +27,9 @@ import io.github.sceneview.ar.ARSceneView
 import io.github.sceneview.ar.node.AnchorNode
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
-import io.github.sceneview.node.CubeNode
-import io.github.sceneview.math.Size
+import io.github.sceneview.node.BillboardNode
+import android.graphics.BitmapFactory
+import androidx.compose.ui.platform.LocalContext
 
 fun pickBestHit(hits: List<HitResult>): HitResult? {
     return hits.firstOrNull { hit ->
@@ -58,6 +59,15 @@ fun ArScreen() {
         mutableStateListOf<Anchor>()
     }
 
+    val context = LocalContext.current
+
+    val pingBitmap = remember {
+        BitmapFactory.decodeResource(
+            context.resources,
+            R.drawable.lynx_ping
+        )
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -79,8 +89,10 @@ fun ArScreen() {
         ) {
             anchors.forEach { anchor ->
                 AnchorNode(anchor = anchor) {
-                    CubeNode(
-                        size = Size(0.08f)
+                    BillboardNode(
+                        bitmap = pingBitmap,
+                        widthMeters = 0.18f,
+                        heightMeters = 0.18f
                     )
                 }
             }
