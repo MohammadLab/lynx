@@ -55,4 +55,8 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+
+    implementation("com.google.ar:core:1.56.0")
+    implementation("io.github.sceneview:arsceneview:4.34.0")
+
 }
