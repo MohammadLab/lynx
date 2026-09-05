@@ -30,6 +30,8 @@ import androidx.compose.ui.unit.IntSize
 import io.github.sceneview.node.BillboardNode
 import android.graphics.BitmapFactory
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
 
 fun pickBestHit(hits: List<HitResult>): HitResult? {
     return hits.firstOrNull { hit ->
@@ -117,27 +119,40 @@ fun ArScreen() {
                 )
         )
 
-        Button(
+        Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 32.dp),
-            onClick = {
-                val frame = latestFrame ?: return@Button
-
-                if (viewportSize.width == 0 || viewportSize.height == 0) {
-                    return@Button
-                }
-
-                val centerX = viewportSize.width / 2f
-                val centerY = viewportSize.height / 2f
-
-                val hits = frame.hitTest(centerX, centerY)
-                val bestHit = pickBestHit(hits) ?: return@Button
-
-                anchors.add(bestHit.createAnchor())
-            }
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text("PING")
+            Button(
+                onClick = {
+                    val frame = latestFrame ?: return@Button
+
+                    if (viewportSize.width == 0 || viewportSize.height == 0) {
+                        return@Button
+                    }
+
+                    val centerX = viewportSize.width / 2f
+                    val centerY = viewportSize.height / 2f
+
+                    val hits = frame.hitTest(centerX, centerY)
+                    val bestHit = pickBestHit(hits) ?: return@Button
+
+                    anchors.add(bestHit.createAnchor())
+                }
+            ) {
+                Text("PING")
+            }
+
+            Button(
+                onClick = {
+                    anchors.forEach { it.detach() }
+                    anchors.clear()
+                }
+            ) {
+                Text("CLEAR")
+            }
         }
     }
 }
