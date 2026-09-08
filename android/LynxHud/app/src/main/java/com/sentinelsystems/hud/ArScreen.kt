@@ -32,6 +32,7 @@ import android.graphics.BitmapFactory
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Arrangement
+import com.sentinelsystems.hud.model.Ping
 
 fun pickBestHit(hits: List<HitResult>): HitResult? {
     return hits.firstOrNull { hit ->
@@ -68,6 +69,10 @@ fun ArScreen() {
             context.resources,
             R.drawable.lynx_ping
         )
+    }
+
+    var lastPing by remember {
+        mutableStateOf<Ping?>(null)
     }
 
     Box(
@@ -108,6 +113,19 @@ fun ArScreen() {
                 .padding(16.dp)
         )
 
+        lastPing?.let { ping ->
+            Text(
+                text = "Ping ${ping.id}\n" +
+                        "x=${"%.2f".format(ping.x)} " +
+                        "y=${"%.2f".format(ping.y)} " +
+                        "z=${"%.2f".format(ping.z)}",
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(top = 48.dp, start = 16.dp)
+            )
+        }
+
         // Center aiming reticle
         Box(
             modifier = Modifier
@@ -117,6 +135,7 @@ fun ArScreen() {
                     color = Color.Red,
                     shape = CircleShape
                 )
+
         )
 
         Row(
@@ -138,6 +157,20 @@ fun ArScreen() {
 
                     val hits = frame.hitTest(centerX, centerY)
                     val bestHit = pickBestHit(hits) ?: return@Button
+
+                    val pose = bestHit.hitPose
+                    val now = System.currentTimeMillis()
+
+                    val ping = Ping(
+                        id = now,
+                        senderId = 1L,
+                        x = pose.tx(),
+                        y = pose.ty(),
+                        z = pose.tz(),
+                        createdAt = now
+                    )
+
+                    lastPing = ping
 
                     anchors.add(bestHit.createAnchor())
                 }
