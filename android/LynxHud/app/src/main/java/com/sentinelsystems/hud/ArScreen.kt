@@ -33,6 +33,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Arrangement
 import com.sentinelsystems.hud.model.Ping
+import com.sentinelsystems.hud.protocol.pingToJson
+
 
 fun pickBestHit(hits: List<HitResult>): HitResult? {
     return hits.firstOrNull { hit ->
@@ -73,6 +75,10 @@ fun ArScreen() {
 
     var lastPing by remember {
         mutableStateOf<Ping?>(null)
+    }
+
+    var lastPingJson by remember {
+        mutableStateOf<String?>(null)
     }
 
     Box(
@@ -126,6 +132,16 @@ fun ArScreen() {
             )
         }
 
+        lastPingJson?.let { json ->
+            Text(
+                text = json,
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(top = 100.dp, start = 16.dp)
+            )
+        }
+
         // Center aiming reticle
         Box(
             modifier = Modifier
@@ -171,6 +187,7 @@ fun ArScreen() {
                     )
 
                     lastPing = ping
+                    lastPingJson = pingToJson(ping)
 
                     anchors.add(bestHit.createAnchor())
                 }
