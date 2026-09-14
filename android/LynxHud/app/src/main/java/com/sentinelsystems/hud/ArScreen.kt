@@ -34,6 +34,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Arrangement
 import com.sentinelsystems.hud.model.Ping
 import com.sentinelsystems.hud.protocol.pingToJson
+import androidx.compose.runtime.rememberCoroutineScope
+import com.sentinelsystems.hud.network.UdpPingSender
+import kotlinx.coroutines.launch
 
 
 fun pickBestHit(hits: List<HitResult>): HitResult? {
@@ -80,6 +83,15 @@ fun ArScreen() {
     var lastPingJson by remember {
         mutableStateOf<String?>(null)
     }
+
+    val coroutineScope = rememberCoroutineScope()
+
+    var udpStatus by remember {
+        mutableStateOf("UDP: idle")
+    }
+
+    val pcHost = "192.168.0.224"
+    val pcPort = 7777
 
     Box(
         modifier = Modifier
@@ -140,7 +152,16 @@ fun ArScreen() {
                     .align(Alignment.TopStart)
                     .padding(top = 100.dp, start = 16.dp)
             )
+
         }
+
+        Text(
+            text = udpStatus,
+            color = Color.White,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(top = 140.dp, start = 16.dp)
+        )
 
         // Center aiming reticle
         Box(
@@ -187,7 +208,23 @@ fun ArScreen() {
                     )
 
                     lastPing = ping
-                    lastPingJson = pingToJson(ping)
+
+                    val json = pingToJson(ping)
+                    lastPingJson = json
+
+                    coroutineScope.launch {
+                        try {
+                            UdpPingSender.send(
+                                json = json,
+                                host = pcHost,
+                                port = pcPort
+                            )
+
+                            udpStatus = "UDP: sent"
+                        } catch (e: Exception) {
+                            udpStatus = "UDP ERROR: ${e.message}"
+                        }
+                    }
 
                     anchors.add(bestHit.createAnchor())
                 }
