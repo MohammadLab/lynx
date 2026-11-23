@@ -110,16 +110,31 @@ CLEAR
 - Detaches local anchors.
 - Sends PING_REMOVE for transmitted pings.
 
-## Physical test still required
+## Physical validation
 
-1. Place/print docs/beacons/apriltag36h11_id0.png on a visible tracked surface.
-2. Run Lynx on the tablet.
-3. Wait for AR: TRACKING and visible plane coverage.
-4. Point the camera at the tag and press CALIBRATE.
-5. Confirm CAL: beacon 0 ready.
-6. Aim at another physical point and press PING.
-7. Confirm the relay receives a PING_CREATE with beaconId=0 and shared coordinates.
-8. Recalibrate and verify calibration replaces the previous transform cleanly.
+Prototype 0.3 was validated successfully on the physical SM-X800 tablet.
+
+Observed result:
+- ARCore reached TRACKING and generated a usable tracked plane.
+- AprilTag 36h11 ID 0 was detected successfully.
+- All four tag corners resolved to tracked-plane hits: 4/4.
+- Calibration reached READY for beacon 0.
+- The shared coordinate frame was built successfully on real hardware.
+- SIM REMOTE projected the synthetic shared point (0.50, 0.00, 1.00) through sharedToLocal.
+- The projected point rendered successfully as a Lynx AR marker.
+- The app remained stable after the earlier OpenCV corner-matrix crash was fixed.
+
+This validates the core Prototype 0.3 spatial pipeline end-to-end on one physical device:
+
+    camera image
+    -> AprilTag detection
+    -> 4/4 ARCore plane hits
+    -> shared calibration frame
+    -> shared coordinate
+    -> sharedToLocal
+    -> rendered AR anchor
+
+A real two-device spatial alignment test remains future work for Prototype 0.4.
 
 ## Boundary
 
