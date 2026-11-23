@@ -13,6 +13,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -48,7 +51,11 @@ import com.sentinelsystems.hud.protocol.pingCreateToJson
 import com.sentinelsystems.hud.protocol.pingRemoveToJson
 import androidx.compose.runtime.rememberCoroutineScope
 import com.sentinelsystems.hud.network.UdpPingSender
+import com.sentinelsystems.hud.network.UdpPingReceiver
+import com.sentinelsystems.hud.protocol.InboundMessage
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 
 fun pickBestHit(hits: List<HitResult>): HitResult? {
@@ -79,12 +86,20 @@ fun ArScreen() {
         mutableStateOf<Session?>(null)
     }
 
-    val anchors = remember {
+    val localAnchors = remember {
         mutableStateListOf<Anchor>()
     }
 
     val pings = remember {
         mutableStateListOf<Ping>()
+    }
+
+    val remotePings = remember {
+        mutableStateMapOf<Long, Ping>()
+    }
+
+    val remoteAnchors = remember {
+        mutableStateMapOf<Long, Anchor>()
     }
 
     val context = LocalContext.current
@@ -122,8 +137,84 @@ fun ArScreen() {
         mutableStateOf<CalibrationAttempt?>(null)
     }
 
+    val localSenderId = 1L
     val pcHost = "192.168.0.241"
     val pcPort = 7777
+    val receivePort = 7778
+
+    val currentCalibrationState = rememberUpdatedState(calibration)
+    val currentSessionState = rememberUpdatedState(latestSession)
+
+    LaunchedEffect(Unit) {
+        val receiver = UdpPingReceiver(receivePort)
+
+        receiver.run(
+            onMessage = { message ->
+                withContext(Dispatchers.Main.immediate) {
+                    when (message) {
+                        is InboundMessage.PingCreate -> {
+                            val ping = message.ping
+
+                            if (ping.senderId == localSenderId) {
+                                udpStatus = "RX: own ping ${ping.id} confirmed"
+                                return@withContext
+                            }
+
+                            val existing = remotePings[ping.id]
+
+                            if (existing == ping) {
+                                udpStatus = "RX: duplicate ${ping.id} ignored"
+                                return@withContext
+                            }
+
+                            remotePings[ping.id] = ping
+
+                            val cal = currentCalibrationState.value
+                            val session = currentSessionState.value
+
+                            if (cal == null || session == null) {
+                                udpStatus = "RX: ping ${ping.id} pending calibration"
+                                return@withContext
+                            }
+
+                            val projection = RemotePingProjector.project(ping, cal)
+
+                            if (projection == null) {
+                                udpStatus = "RX: frame mismatch b${ping.beaconId}"
+                                return@withContext
+                            }
+
+                            remoteAnchors.remove(ping.id)?.detach()
+
+                            val local = projection.localPosition
+                            val anchor = session.createAnchor(
+                                Pose.makeTranslation(local.x, local.y, local.z)
+                            )
+
+                            remoteAnchors[ping.id] = anchor
+                            udpStatus = "RX: rendered ping ${ping.id}"
+                        }
+
+                        is InboundMessage.PingRemove -> {
+                            if (message.senderId == localSenderId) {
+                                udpStatus = "RX: own remove ${message.pingId} confirmed"
+                                return@withContext
+                            }
+
+                            remotePings.remove(message.pingId)
+                            remoteAnchors.remove(message.pingId)?.detach()
+                            udpStatus = "RX: removed ping ${message.pingId}"
+                        }
+                    }
+                }
+            },
+            onStatus = { status ->
+                withContext(Dispatchers.Main.immediate) {
+                    udpStatus = status
+                }
+            }
+        )
+    }
 
     Box(
         modifier = Modifier
@@ -145,7 +236,17 @@ fun ArScreen() {
                 }
             }
         ) {
-            anchors.forEach { anchor ->
+            localAnchors.forEach { anchor ->
+                AnchorNode(anchor = anchor) {
+                    BillboardNode(
+                        bitmap = pingBitmap,
+                        widthMeters = 0.18f,
+                        heightMeters = 0.18f
+                    )
+                }
+            }
+
+            remoteAnchors.values.forEach { anchor ->
                 AnchorNode(anchor = anchor) {
                     BillboardNode(
                         bitmap = pingBitmap,
@@ -168,7 +269,7 @@ fun ArScreen() {
         ) {
             Column {
                 Text(
-                    text = "LYNX  •  PROTOTYPE 0.3",
+                    text = "LYNX  •  PROTOTYPE 0.4",
                     color = Color.White,
                     fontSize = 14.sp
                 )
@@ -194,6 +295,11 @@ fun ArScreen() {
 
                 Text(
                     text = udpStatus,
+                    color = Color.White,
+                    fontSize = 13.sp
+                )
+                Text(
+                    text = "REMOTE  ${remotePings.size} ping(s)  ${remoteAnchors.size} rendered",
                     color = Color.White,
                     fontSize = 13.sp
                 )
@@ -248,6 +354,22 @@ fun ArScreen() {
 
                         calibration = built
                         calibrationStatus = "READY  •  BEACON ${built.beaconId}"
+
+                        remoteAnchors.values.forEach { it.detach() }
+                        remoteAnchors.clear()
+
+                        val session = latestSession
+                        if (session != null) {
+                            remotePings.values.forEach { ping ->
+                                val projection = RemotePingProjector.project(ping, built)
+                                    ?: return@forEach
+
+                                val local = projection.localPosition
+                                remoteAnchors[ping.id] = session.createAnchor(
+                                    Pose.makeTranslation(local.x, local.y, local.z)
+                                )
+                            }
+                        }
                     } catch (e: Exception) {
                         Log.e("LynxCalibration", "Calibration failed", e)
                         calibrationStatus =
@@ -287,7 +409,7 @@ fun ArScreen() {
                     }
 
                     val local = projection.localPosition
-                    anchors.add(
+                    localAnchors.add(
                         session.createAnchor(
                             Pose.makeTranslation(
                                 local.x,
@@ -318,7 +440,7 @@ fun ArScreen() {
                     val bestHit = pickBestHit(hits) ?: return@Button
                     val pose = bestHit.hitPose
 
-                    anchors.add(bestHit.createAnchor())
+                    localAnchors.add(bestHit.createAnchor())
 
                     val currentCalibration = calibration
 
@@ -338,7 +460,7 @@ fun ArScreen() {
                     val now = System.currentTimeMillis()
                     val ping = Ping(
                         id = now,
-                        senderId = 1L,
+                        senderId = localSenderId,
                         beaconId = currentCalibration.beaconId,
                         x = shared.x,
                         y = shared.y,
@@ -375,8 +497,8 @@ fun ArScreen() {
                 onClick = {
                     val pingsToRemove = pings.toList()
 
-                    anchors.forEach { it.detach() }
-                    anchors.clear()
+                    localAnchors.forEach { it.detach() }
+                    localAnchors.clear()
                     pings.clear()
                     lastPing = null
                     lastPingJson = null

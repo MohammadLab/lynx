@@ -1,0 +1,106 @@
+# Prototype 0.4 — Remote AR Rendering
+
+## Objective
+
+Receive authoritative shared-space ping state over UDP on Android and render it in the calibrated local ARCore frame.
+
+## Data flow
+
+    remote sender
+    -> PING_CREATE shared coordinates
+    -> relay validates/stores
+    -> relay forwards accepted message
+    -> Android UDP receiver
+    -> JSON parse
+    -> remote ping state
+    -> beaconId check
+    -> sharedToLocal
+    -> ARCore anchor
+    -> Lynx billboard marker
+
+PING_REMOVE follows the same authoritative path and detaches the matching remote anchor.
+
+## Android receive port
+
+The Android client listens on UDP port 7778.
+
+The current relay still has a single forward endpoint. For the first Prototype 0.4 slice, point the relay directly at the tablet:
+
+    .\scripts\Run-Prototype04.ps1 -TabletIp <tablet-ip>
+
+The tablet IP is DHCP-dependent and may change.
+
+## Receiver state rules
+
+Remote pings and local pings have separate ownership.
+
+Local anchors:
+- created by the local PING button.
+- cleared by local CLEAR.
+- may be transmitted to the relay.
+
+Remote pings:
+- stored by ping ID.
+- rendered only when a compatible calibration exists.
+- duplicate identical creates are ignored.
+- mismatched beacon frames are not rendered.
+- remove messages detach only the matching remote anchor.
+- local CLEAR does not delete authoritative remote state.
+- recalibration detaches stale remote anchors and reprojects cached remote pings into the new local frame.
+
+## Self echo
+
+The local development sender ID is currently 1.
+
+If the relay echoes a locally-created ping back to the same Android client, the receiver treats it as confirmation instead of rendering a duplicate remote marker.
+
+Unique runtime client identity is still future work.
+
+## Pending-before-calibration behavior
+
+A valid remote PING_CREATE received before calibration is retained in remote state.
+
+After successful calibration, cached remote pings with the matching beacon ID are projected and rendered automatically.
+
+This prevents network state from being lost just because spatial calibration happened later.
+
+## Verification completed
+
+Real relay-to-tablet network smoke test on SM-X800:
+
+- tablet IP observed: 192.168.0.132.
+- Android receiver listened on UDP :7778.
+- PC sender created ping ID 4001, sender 99, beacon 0, shared (0.50, 0.00, 1.00).
+- relay accepted and forwarded the create to the tablet.
+- Android HUD reported:
+
+      RX: ping 4001 pending calibration
+      REMOTE 1 ping(s) 0 rendered
+
+- PC sender then sent PING_REMOVE for ID 4001.
+- relay accepted and forwarded the remove.
+- Android HUD reported:
+
+      RX: removed ping 4001
+      REMOTE 0 ping(s) 0 rendered
+
+This proves the real network receive, parse, store, and remove path.
+
+## Remaining physical validation
+
+With the tablet calibrated to beacon 0:
+
+1. Start the relay forwarding to the tablet.
+2. Send a PING_CREATE from LynxPingSender using a different sender ID, for example 99.
+3. Confirm Android reports the ping as rendered.
+4. Confirm a Lynx marker appears at the expected shared-space location.
+5. Send PING_REMOVE for the same ID.
+6. Confirm the AR marker disappears.
+
+## Known limitations
+
+- relay currently forwards to only one endpoint.
+- Android local sender ID is hardcoded to 1.
+- relay host and tablet IP handling are still prototype configuration.
+- no snapshot/reconnect state recovery yet.
+- no encrypted transport/authentication yet.
