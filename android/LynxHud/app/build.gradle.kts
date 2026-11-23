@@ -58,5 +58,6 @@ dependencies {
 
     implementation("com.google.ar:core:1.56.0")
     implementation("io.github.sceneview:arsceneview:4.34.0")
+    implementation("org.opencv:opencv:5.0.0")
 
 }

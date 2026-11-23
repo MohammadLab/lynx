@@ -2,10 +2,12 @@ package com.sentinelsystems.hud
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -18,10 +20,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.google.ar.core.Anchor
 import com.google.ar.core.Frame
 import com.google.ar.core.HitResult
 import com.google.ar.core.Plane
+import com.google.ar.core.Pose
+import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import io.github.sceneview.ar.ARSceneView
 import io.github.sceneview.ar.node.AnchorNode
@@ -29,11 +34,18 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import io.github.sceneview.node.BillboardNode
 import android.graphics.BitmapFactory
+import android.util.Log
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Arrangement
 import com.sentinelsystems.hud.model.Ping
-import com.sentinelsystems.hud.protocol.pingToJson
+import com.sentinelsystems.hud.calibration.BeaconDetector
+import com.sentinelsystems.hud.calibration.Calibration
+import com.sentinelsystems.hud.calibration.CalibrationAttempt
+import com.sentinelsystems.hud.calibration.Vec3
+import com.sentinelsystems.hud.calibration.RemotePingProjector
+import com.sentinelsystems.hud.protocol.pingCreateToJson
+import com.sentinelsystems.hud.protocol.pingRemoveToJson
 import androidx.compose.runtime.rememberCoroutineScope
 import com.sentinelsystems.hud.network.UdpPingSender
 import kotlinx.coroutines.launch
@@ -63,8 +75,16 @@ fun ArScreen() {
         mutableStateOf<Frame?>(null)
     }
 
+    var latestSession by remember {
+        mutableStateOf<Session?>(null)
+    }
+
     val anchors = remember {
         mutableStateListOf<Anchor>()
+    }
+
+    val pings = remember {
+        mutableStateListOf<Ping>()
     }
 
     val context = LocalContext.current
@@ -90,7 +110,19 @@ fun ArScreen() {
         mutableStateOf("UDP: idle")
     }
 
-    val pcHost = "192.168.0.224"
+    var calibration by remember {
+        mutableStateOf<Calibration?>(null)
+    }
+
+    var calibrationStatus by remember {
+        mutableStateOf("NOT CALIBRATED")
+    }
+
+    var calibrationAttempt by remember {
+        mutableStateOf<CalibrationAttempt?>(null)
+    }
+
+    val pcHost = "192.168.0.241"
     val pcPort = 7777
 
     Box(
@@ -102,7 +134,8 @@ fun ArScreen() {
         ARSceneView(
             modifier = Modifier.fillMaxSize(),
             planeRenderer = true,
-            onSessionUpdated = { _, frame ->
+            onSessionUpdated = { session, frame ->
+                latestSession = session
                 latestFrame = frame
 
                 trackingState = when (frame.camera.trackingState) {
@@ -123,45 +156,60 @@ fun ArScreen() {
             }
         }
 
-        Text(
-            text = "AR: $trackingState",
-            color = Color.White,
+        Box(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(16.dp)
-        )
+                .padding(14.dp)
+                .background(
+                    color = Color.Black.copy(alpha = 0.68f),
+                    shape = RoundedCornerShape(12.dp)
+                )
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+        ) {
+            Column {
+                Text(
+                    text = "LYNX  •  PROTOTYPE 0.3",
+                    color = Color.White,
+                    fontSize = 14.sp
+                )
+                Text(
+                    text = "AR      $trackingState",
+                    color = Color.White,
+                    fontSize = 13.sp
+                )
+                Text(
+                    text = "CAL     $calibrationStatus",
+                    color = if (calibration != null) Color.Green else Color.White,
+                    fontSize = 13.sp
+                )
 
-        lastPing?.let { ping ->
-            Text(
-                text = "Ping ${ping.id}\n" +
-                        "x=${"%.2f".format(ping.x)} " +
-                        "y=${"%.2f".format(ping.y)} " +
-                        "z=${"%.2f".format(ping.z)}",
-                color = Color.White,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(top = 48.dp, start = 16.dp)
-            )
+                calibrationAttempt?.let { attempt ->
+                    val tagText = attempt.detection?.beaconId?.toString() ?: "--"
+                    Text(
+                        text = "TAG     $tagText    HITS ${attempt.planeHits}/4",
+                        color = Color.White,
+                        fontSize = 13.sp
+                    )
+                }
+
+                Text(
+                    text = udpStatus,
+                    color = Color.White,
+                    fontSize = 13.sp
+                )
+
+                lastPing?.let { ping ->
+                    Text(
+                        text = "SHARED  b${ping.beaconId}  " +
+                            "(${"%.2f".format(ping.x)}, " +
+                            "${"%.2f".format(ping.y)}, " +
+                            "${"%.2f".format(ping.z)})",
+                        color = Color.White,
+                        fontSize = 13.sp
+                    )
+                }
+            }
         }
-
-        lastPingJson?.let { json ->
-            Text(
-                text = json,
-                color = Color.White,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(top = 100.dp, start = 16.dp)
-            )
-
-        }
-
-        Text(
-            text = udpStatus,
-            color = Color.White,
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(top = 140.dp, start = 16.dp)
-        )
 
         // Center aiming reticle
         Box(
@@ -185,6 +233,80 @@ fun ArScreen() {
                 onClick = {
                     val frame = latestFrame ?: return@Button
 
+                    calibrationStatus = "SCANNING..."
+
+                    try {
+                        val attempt = BeaconDetector.attemptCalibration(frame)
+                        calibrationAttempt = attempt
+
+                        val built = attempt.calibration
+
+                        if (built == null) {
+                            calibrationStatus = attempt.message.uppercase()
+                            return@Button
+                        }
+
+                        calibration = built
+                        calibrationStatus = "READY  •  BEACON ${built.beaconId}"
+                    } catch (e: Exception) {
+                        Log.e("LynxCalibration", "Calibration failed", e)
+                        calibrationStatus =
+                            "ERROR  •  ${e.javaClass.simpleName}"
+                    }
+                }
+            ) {
+                Text("CALIBRATE")
+            }
+
+            Button(
+                onClick = {
+                    val currentCalibration = calibration ?: run {
+                        udpStatus = "SIM REMOTE: calibrate first"
+                        return@Button
+                    }
+
+                    val session = latestSession ?: return@Button
+                    val now = System.currentTimeMillis()
+
+                    val simulatedRemotePing = Ping(
+                        id = now,
+                        senderId = 99L,
+                        beaconId = currentCalibration.beaconId,
+                        x = 0.50f,
+                        y = 0.00f,
+                        z = 1.00f,
+                        createdAt = now
+                    )
+
+                    val projection = RemotePingProjector.project(
+                        ping = simulatedRemotePing,
+                        calibration = currentCalibration
+                    ) ?: run {
+                        udpStatus = "SIM REMOTE: frame mismatch"
+                        return@Button
+                    }
+
+                    val local = projection.localPosition
+                    anchors.add(
+                        session.createAnchor(
+                            Pose.makeTranslation(
+                                local.x,
+                                local.y,
+                                local.z
+                            )
+                        )
+                    )
+
+                    udpStatus = "SIM REMOTE: rendered shared (0.50, 0.00, 1.00)"
+                }
+            ) {
+                Text("SIM REMOTE")
+            }
+
+            Button(
+                onClick = {
+                    val frame = latestFrame ?: return@Button
+
                     if (viewportSize.width == 0 || viewportSize.height == 0) {
                         return@Button
                     }
@@ -194,22 +316,39 @@ fun ArScreen() {
 
                     val hits = frame.hitTest(centerX, centerY)
                     val bestHit = pickBestHit(hits) ?: return@Button
-
                     val pose = bestHit.hitPose
-                    val now = System.currentTimeMillis()
 
+                    anchors.add(bestHit.createAnchor())
+
+                    val currentCalibration = calibration
+
+                    if (currentCalibration == null) {
+                        udpStatus = "LOCAL ONLY: calibrate beacon first"
+                        return@Button
+                    }
+
+                    val shared = currentCalibration.localToShared(
+                        Vec3(
+                            x = pose.tx(),
+                            y = pose.ty(),
+                            z = pose.tz()
+                        )
+                    )
+
+                    val now = System.currentTimeMillis()
                     val ping = Ping(
                         id = now,
                         senderId = 1L,
-                        x = pose.tx(),
-                        y = pose.ty(),
-                        z = pose.tz(),
+                        beaconId = currentCalibration.beaconId,
+                        x = shared.x,
+                        y = shared.y,
+                        z = shared.z,
                         createdAt = now
                     )
 
                     lastPing = ping
 
-                    val json = pingToJson(ping)
+                    val json = pingCreateToJson(ping)
                     lastPingJson = json
 
                     coroutineScope.launch {
@@ -220,13 +359,13 @@ fun ArScreen() {
                                 port = pcPort
                             )
 
-                            udpStatus = "UDP: sent"
+                            udpStatus = "UDP: shared ping sent"
                         } catch (e: Exception) {
                             udpStatus = "UDP ERROR: ${e.message}"
                         }
                     }
 
-                    anchors.add(bestHit.createAnchor())
+                    pings.add(ping)
                 }
             ) {
                 Text("PING")
@@ -234,8 +373,32 @@ fun ArScreen() {
 
             Button(
                 onClick = {
+                    val pingsToRemove = pings.toList()
+
                     anchors.forEach { it.detach() }
                     anchors.clear()
+                    pings.clear()
+                    lastPing = null
+                    lastPingJson = null
+
+                    coroutineScope.launch {
+                        try {
+                            pingsToRemove.forEach { ping ->
+                                UdpPingSender.send(
+                                    json = pingRemoveToJson(
+                                        pingId = ping.id,
+                                        senderId = ping.senderId
+                                    ),
+                                    host = pcHost,
+                                    port = pcPort
+                                )
+                            }
+
+                            udpStatus = "UDP: removed ${pingsToRemove.size}"
+                        } catch (e: Exception) {
+                            udpStatus = "UDP ERROR: ${e.message}"
+                        }
+                    }
                 }
             ) {
                 Text("CLEAR")

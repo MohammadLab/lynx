@@ -1,0 +1,19 @@
+# .NET build output
+**/bin/
+**/obj/
+
+# Android / Gradle build output
+**/.gradle/
+**/build/
+**/local.properties
+**/.idea/
+*.iml
+
+# IDE/user files
+.vs/
+*.user
+*.suo
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
