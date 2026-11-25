@@ -158,6 +158,17 @@ public sealed class PingCodecTests
     }
 
     [Fact]
+    public void MessageCodec_AcceptsSnapshotRequest()
+    {
+        var bytes = LynxMessageCodec.Serialize(LynxMessageCodec.RequestSnapshot(101));
+        var ok = LynxMessageCodec.TryParse(bytes, out var parsed, out var error);
+
+        Assert.True(ok, error);
+        Assert.Equal(LynxMessageTypes.SnapshotRequest, parsed!.Type);
+        Assert.Equal(101L, parsed.ClientId);
+    }
+
+    [Fact]
     public void MessageCodec_SnapshotRoundTripsPings()
     {
         var pings = new[]

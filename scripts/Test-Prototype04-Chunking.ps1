@@ -49,7 +49,7 @@ try {
 
     Write-Host "[Chunking] Registering late viewer..."
     $viewer = Start-Process dotnet -PassThru -NoNewWindow -RedirectStandardOutput $viewerLog -ArgumentList $viewerArgs
-    Wait-ForPattern $relayLog "REGISTER client=301.*snapshot=35.*chunks=3.*version=35"
+    Wait-ForPattern $relayLog "REGISTER client=301.*snapshot=35.*chunks=\d+.*version=35"
     Wait-ForPattern $viewerLog "SNAPSHOT applied total=35 .*version=35"
 
     Write-Host "[Chunking] Verifying next contiguous diff after snapshot..."
@@ -59,13 +59,21 @@ try {
     Wait-ForPattern $relayLog "REMOVE id=8001.*version=36"
 
     $viewerText = Get-Content $viewerLog -Raw
-    if ($viewerText -notmatch "SNAPSHOT chunk 1/3") { throw "Chunk 1/3 was not observed." }
-    if ($viewerText -notmatch "SNAPSHOT chunk 2/3") { throw "Chunk 2/3 was not observed." }
+    $relayText = Get-Content $relayLog -Raw
+    if ($viewerText -notmatch "SNAPSHOT chunk 1/\d+") { throw "Multiple snapshot chunks were not observed." }
     if ($viewerText -notmatch "SNAPSHOT applied total=35 .*version=35") { throw "Chunked snapshot was not assembled." }
+
+    $chunkSizes = [regex]::Matches($relayText, "SNAPSHOT chunk=\d+/\d+ bytes=(\d+)")
+    if ($chunkSizes.Count -lt 2) { throw "Snapshot was not split into multiple byte-budgeted chunks." }
+    foreach ($match in $chunkSizes) {
+        $bytes = [int]$match.Groups[1].Value
+        if ($bytes -gt 1200) { throw "Snapshot chunk exceeded 1200-byte budget: $bytes" }
+    }
 
     Write-Host ""
     Write-Host "[PASS] Prototype 0.4 snapshot chunking regression passed."
-    Write-Host "[PASS] 35 pings were split into three bounded snapshot chunks."
+    Write-Host "[PASS] 35 pings were adaptively split into multiple chunks."
+    Write-Host "[PASS] Every serialized snapshot packet stayed within 1200 bytes."
     Write-Host "[PASS] Viewer assembled all 35 before replacing local state."
     Write-Host "[PASS] Version 36 diff applied after version 35 snapshot."
 }

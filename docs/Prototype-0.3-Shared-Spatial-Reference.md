@@ -134,10 +134,10 @@ This validates the core Prototype 0.3 spatial pipeline end-to-end on one physica
     -> sharedToLocal
     -> rendered AR anchor
 
-A real two-device spatial alignment test remains future work for Prototype 0.4.
+A real two-device spatial alignment test remains hardware validation pending a second ARCore device. Prototype 0.4 software testing emulates the second sender and has already validated the real tablet receive/render path.
 
 ## Boundary
 
 Prototype 0.3 establishes the shared coordinate system and conversion infrastructure.
 
-Prototype 0.4 will use that infrastructure for full multi-device remote AR rendering and synchronization.
+Prototype 0.4 builds on that infrastructure with authoritative multi-client synchronization and remote AR rendering.

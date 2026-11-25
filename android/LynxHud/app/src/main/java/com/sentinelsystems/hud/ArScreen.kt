@@ -19,6 +19,8 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -53,12 +55,15 @@ import com.sentinelsystems.hud.protocol.pingRemoveToJson
 import androidx.compose.runtime.rememberCoroutineScope
 import com.sentinelsystems.hud.network.UdpPingSender
 import com.sentinelsystems.hud.network.UdpPingReceiver
+import com.sentinelsystems.hud.network.RelayDiscovery
+import com.sentinelsystems.hud.network.RelayEndpoint
 import com.sentinelsystems.hud.protocol.InboundMessage
 import com.sentinelsystems.hud.protocol.SnapshotAssembler
 import com.sentinelsystems.hud.protocol.SnapshotAssemblyStatus
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 
 
 fun pickBestHit(hits: List<HitResult>): HitResult? {
@@ -93,6 +98,10 @@ fun ArScreen() {
         mutableStateListOf<Anchor>()
     }
 
+    val renderAnchors = remember {
+        mutableStateListOf<Anchor>()
+    }
+
     val pings = remember {
         mutableStateListOf<Ping>()
     }
@@ -123,6 +132,34 @@ fun ArScreen() {
     }
 
     val coroutineScope = rememberCoroutineScope()
+    val retiringAnchors = remember { mutableSetOf<Anchor>() }
+
+    fun registerRenderAnchor(anchor: Anchor): Anchor {
+        renderAnchors.add(anchor)
+        return anchor
+    }
+
+    fun retireAnchor(anchor: Anchor) {
+        if (!retiringAnchors.add(anchor)) return
+
+        anchor.detach()
+        coroutineScope.launch {
+            repeat(3) {
+                withFrameNanos { }
+            }
+            delay(50)
+            renderAnchors.remove(anchor)
+            retiringAnchors.remove(anchor)
+        }
+    }
+
+    fun retireRemoteAnchor(pingId: Long) {
+        remoteAnchors.remove(pingId)?.let(::retireAnchor)
+    }
+
+    fun retireAllRemoteAnchors() {
+        remoteAnchors.keys.toList().forEach(::retireRemoteAnchor)
+    }
 
     var udpStatus by remember {
         mutableStateOf("UDP: idle")
@@ -143,9 +180,12 @@ fun ArScreen() {
     val localSenderId = remember {
         ClientIdentityStore(context).getOrCreate()
     }
-    val pcHost = BuildConfig.LYNX_RELAY_HOST
-    val pcPort = BuildConfig.LYNX_RELAY_PORT
+    val configuredRelayHost = BuildConfig.LYNX_RELAY_HOST
+    val configuredRelayPort = BuildConfig.LYNX_RELAY_PORT
     val receivePort = 7778
+    var relayEndpoint by remember {
+        mutableStateOf<RelayEndpoint?>(null)
+    }
 
     val currentCalibrationState = rememberUpdatedState(calibration)
     val currentSessionState = rememberUpdatedState(latestSession)
@@ -155,10 +195,26 @@ fun ArScreen() {
     var receiverEpoch by remember { mutableStateOf(0) }
 
     LaunchedEffect(receiverEpoch) {
+        val resolvedRelay = RelayDiscovery.resolve(
+            configuredHost = configuredRelayHost,
+            configuredPort = configuredRelayPort
+        )
+
+        if (resolvedRelay == null) {
+            relayEndpoint = null
+            udpStatus = "DISCOVERY: relay not found; retrying"
+            delay(5_000)
+            receiverEpoch++
+            return@LaunchedEffect
+        }
+
+        relayEndpoint = resolvedRelay
+        udpStatus = "RELAY: ${resolvedRelay.host}:${resolvedRelay.port}"
+
         val receiver = UdpPingReceiver(
             listenPort = receivePort,
-            relayHost = pcHost,
-            relayPort = pcPort,
+            relayHost = resolvedRelay.host,
+            relayPort = resolvedRelay.port,
             clientId = localSenderId
         )
 
@@ -226,10 +282,12 @@ fun ArScreen() {
                                 return@withContext
                             }
 
-                            remoteAnchors.remove(ping.id)?.detach()
+                            retireRemoteAnchor(ping.id)
                             val local = projection.localPosition
-                            remoteAnchors[ping.id] = session.createAnchor(
-                                Pose.makeTranslation(local.x, local.y, local.z)
+                            remoteAnchors[ping.id] = registerRenderAnchor(
+                                session.createAnchor(
+                                    Pose.makeTranslation(local.x, local.y, local.z)
+                                )
                             )
                             udpStatus = "RX: rendered ping ${ping.id} v${version ?: "-"}"
                         }
@@ -272,7 +330,7 @@ fun ArScreen() {
                             }
 
                             remotePings.remove(message.pingId)
-                            remoteAnchors[message.pingId]?.detach()
+                            retireRemoteAnchor(message.pingId)
                             udpStatus = "RX: removed ping ${message.pingId} v${version ?: "-"}"
                         }
 
@@ -301,7 +359,7 @@ fun ArScreen() {
                                 SnapshotAssemblyStatus.COMPLETE -> Unit
                             }
 
-                            remoteAnchors.values.forEach { it.detach() }
+                            retireAllRemoteAnchors()
                             remotePings.clear()
 
                             val cal = currentCalibrationState.value
@@ -317,8 +375,10 @@ fun ArScreen() {
                                     val projection = RemotePingProjector.project(ping, cal)
                                     if (projection != null) {
                                         val local = projection.localPosition
-                                        remoteAnchors[ping.id] = session.createAnchor(
-                                            Pose.makeTranslation(local.x, local.y, local.z)
+                                        remoteAnchors[ping.id] = registerRenderAnchor(
+                                            session.createAnchor(
+                                                Pose.makeTranslation(local.x, local.y, local.z)
+                                            )
                                         )
                                     }
                                 }
@@ -363,23 +423,15 @@ fun ArScreen() {
                 }
             }
         ) {
-            localAnchors.forEach { anchor ->
-                AnchorNode(anchor = anchor) {
-                    BillboardNode(
-                        bitmap = pingBitmap,
-                        widthMeters = 0.18f,
-                        heightMeters = 0.18f
-                    )
-                }
-            }
-
-            remoteAnchors.values.forEach { anchor ->
-                AnchorNode(anchor = anchor) {
-                    BillboardNode(
-                        bitmap = pingBitmap,
-                        widthMeters = 0.18f,
-                        heightMeters = 0.18f
-                    )
+            renderAnchors.forEach { anchor ->
+                key(anchor) {
+                    AnchorNode(anchor = anchor) {
+                        BillboardNode(
+                            bitmap = pingBitmap,
+                            widthMeters = 0.18f,
+                            heightMeters = 0.18f
+                        )
+                    }
                 }
             }
         }
@@ -422,6 +474,11 @@ fun ArScreen() {
 
                 Text(
                     text = udpStatus,
+                    color = Color.White,
+                    fontSize = 13.sp
+                )
+                Text(
+                    text = "RELAY   ${relayEndpoint?.let { "${it.host}:${it.port}" } ?: "--"}",
                     color = Color.White,
                     fontSize = 13.sp
                 )
@@ -488,8 +545,7 @@ fun ArScreen() {
                         calibration = built
                         calibrationStatus = "READY  •  BEACON ${built.beaconId}"
 
-                        remoteAnchors.values.forEach { it.detach() }
-                        remoteAnchors.clear()
+                        retireAllRemoteAnchors()
 
                         val session = latestSession
                         if (session != null) {
@@ -498,8 +554,10 @@ fun ArScreen() {
                                     ?: return@forEach
 
                                 val local = projection.localPosition
-                                remoteAnchors[ping.id] = session.createAnchor(
-                                    Pose.makeTranslation(local.x, local.y, local.z)
+                                remoteAnchors[ping.id] = registerRenderAnchor(
+                                    session.createAnchor(
+                                        Pose.makeTranslation(local.x, local.y, local.z)
+                                    )
                                 )
                             }
                         }
@@ -543,11 +601,13 @@ fun ArScreen() {
 
                     val local = projection.localPosition
                     localAnchors.add(
-                        session.createAnchor(
-                            Pose.makeTranslation(
-                                local.x,
-                                local.y,
-                                local.z
+                        registerRenderAnchor(
+                            session.createAnchor(
+                                Pose.makeTranslation(
+                                    local.x,
+                                    local.y,
+                                    local.z
+                                )
                             )
                         )
                     )
@@ -573,7 +633,7 @@ fun ArScreen() {
                     val bestHit = pickBestHit(hits) ?: return@Button
                     val pose = bestHit.hitPose
 
-                    localAnchors.add(bestHit.createAnchor())
+                    localAnchors.add(registerRenderAnchor(bestHit.createAnchor()))
 
                     val currentCalibration = calibration
 
@@ -607,11 +667,17 @@ fun ArScreen() {
                     lastPingJson = json
 
                     coroutineScope.launch {
+                        val endpoint = relayEndpoint
+                        if (endpoint == null) {
+                            udpStatus = "UDP: relay unavailable"
+                            return@launch
+                        }
+
                         try {
                             UdpPingSender.send(
                                 json = json,
-                                host = pcHost,
-                                port = pcPort
+                                host = endpoint.host,
+                                port = endpoint.port
                             )
 
                             udpStatus = "UDP: shared ping sent"
@@ -630,13 +696,19 @@ fun ArScreen() {
                 onClick = {
                     val pingsToRemove = pings.toList()
 
-                    localAnchors.forEach { it.detach() }
+                    localAnchors.toList().forEach(::retireAnchor)
                     localAnchors.clear()
                     pings.clear()
                     lastPing = null
                     lastPingJson = null
 
                     coroutineScope.launch {
+                        val endpoint = relayEndpoint
+                        if (endpoint == null) {
+                            udpStatus = "UDP: relay unavailable"
+                            return@launch
+                        }
+
                         try {
                             pingsToRemove.forEach { ping ->
                                 UdpPingSender.send(
@@ -644,8 +716,8 @@ fun ArScreen() {
                                         pingId = ping.id,
                                         senderId = ping.senderId
                                     ),
-                                    host = pcHost,
-                                    port = pcPort
+                                    host = endpoint.host,
+                                    port = endpoint.port
                                 )
                             }
 

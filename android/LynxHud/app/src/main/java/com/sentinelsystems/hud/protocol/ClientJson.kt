@@ -13,3 +13,9 @@ fun clientHeartbeatToJson(clientId: Long): String =
         .put("type", "CLIENT_HEARTBEAT")
         .put("clientId", clientId)
         .toString()
+
+fun snapshotRequestToJson(clientId: Long): String =
+    JSONObject()
+        .put("type", "SNAPSHOT_REQUEST")
+        .put("clientId", clientId)
+        .toString()

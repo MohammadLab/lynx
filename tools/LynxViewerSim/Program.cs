@@ -38,6 +38,9 @@ var receivedPings = new Dictionary<long, PingMessage>();
 var snapshotAssembler = new SnapshotAssembler();
 long appliedEpoch = 0;
 long appliedVersion = 0;
+long? pendingSnapshotId = null;
+DateTimeOffset? snapshotDeadlineUtc = null;
+var snapshotTimeout = TimeSpan.FromSeconds(3);
 using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, listenPort));
 using var cts = new CancellationTokenSource();
 
@@ -57,14 +60,31 @@ Console.WriteLine();
 await SendToRelay(LynxMessageCodec.RegisterClient(clientId));
 Console.WriteLine("[ViewerSim] REGISTER sent.");
 
-var heartbeatTask = Task.Run(async () =>
+var maintenanceTask = Task.Run(async () =>
 {
+    var nextHeartbeatUtc = DateTimeOffset.UtcNow + heartbeatInterval;
+
     while (!cts.IsCancellationRequested)
     {
         try
         {
-            await Task.Delay(heartbeatInterval, cts.Token);
-            await SendToRelay(LynxMessageCodec.Heartbeat(clientId));
+            await Task.Delay(250, cts.Token);
+            var now = DateTimeOffset.UtcNow;
+
+            if (now >= nextHeartbeatUtc)
+            {
+                await SendToRelay(LynxMessageCodec.Heartbeat(clientId));
+                nextHeartbeatUtc = now + heartbeatInterval;
+            }
+
+            if (snapshotDeadlineUtc is not null && now >= snapshotDeadlineUtc)
+            {
+                Console.WriteLine("[ViewerSim] SNAPSHOT timeout; requesting fresh snapshot");
+                snapshotAssembler.Reset();
+                pendingSnapshotId = null;
+                snapshotDeadlineUtc = null;
+                await SendToRelay(LynxMessageCodec.RequestSnapshot(clientId));
+            }
         }
         catch (OperationCanceledException)
         {
@@ -112,6 +132,12 @@ try
             {
                 var result = snapshotAssembler.Add(message, appliedEpoch, appliedVersion);
 
+                if (pendingSnapshotId != message.SnapshotId)
+                {
+                    pendingSnapshotId = message.SnapshotId;
+                    snapshotDeadlineUtc = DateTimeOffset.UtcNow + snapshotTimeout;
+                }
+
                 if (result.Status == SnapshotAssemblyStatus.Stale)
                 {
                     Console.WriteLine(
@@ -123,7 +149,9 @@ try
                 {
                     Console.WriteLine("[ViewerSim] SNAPSHOT conflict; requesting fresh snapshot");
                     snapshotAssembler.Reset();
-                    await SendToRelay(LynxMessageCodec.RegisterClient(clientId));
+                    pendingSnapshotId = null;
+                    snapshotDeadlineUtc = null;
+                    await SendToRelay(LynxMessageCodec.RequestSnapshot(clientId));
                     break;
                 }
 
@@ -135,6 +163,8 @@ try
                     break;
                 }
 
+                pendingSnapshotId = null;
+                snapshotDeadlineUtc = null;
                 receivedPings.Clear();
                 foreach (var ping in result.Pings!)
                 {
@@ -260,7 +290,7 @@ try
 finally
 {
     cts.Cancel();
-    await heartbeatTask;
+    await maintenanceTask;
 }
 
 async Task SendToRelay(LynxMessage message)

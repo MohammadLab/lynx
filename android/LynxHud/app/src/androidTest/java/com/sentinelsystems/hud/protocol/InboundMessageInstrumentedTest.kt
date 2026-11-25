@@ -56,14 +56,17 @@ class InboundMessageInstrumentedTest {
     }
 
     @Test
-    fun createsRegisterAndHeartbeatJson() {
+    fun createsRegisterHeartbeatAndSnapshotRequestJson() {
         val register = clientRegisterToJson(1L)
         val heartbeat = clientHeartbeatToJson(1L)
+        val snapshotRequest = snapshotRequestToJson(1L)
 
         assertTrue(register.contains("\"type\":\"CLIENT_REGISTER\""))
         assertTrue(register.contains("\"clientId\":1"))
         assertTrue(heartbeat.contains("\"type\":\"CLIENT_HEARTBEAT\""))
         assertTrue(heartbeat.contains("\"clientId\":1"))
+        assertTrue(snapshotRequest.contains("\"type\":\"SNAPSHOT_REQUEST\""))
+        assertTrue(snapshotRequest.contains("\"clientId\":1"))
     }
 
     @Test

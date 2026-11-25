@@ -9,6 +9,7 @@ public static class LynxMessageTypes
     public const string PingRemove = "PING_REMOVE";
     public const string ClientRegister = "CLIENT_REGISTER";
     public const string ClientHeartbeat = "CLIENT_HEARTBEAT";
+    public const string SnapshotRequest = "SNAPSHOT_REQUEST";
     public const string Snapshot = "SNAPSHOT";
 }
 
@@ -98,6 +99,7 @@ public static class LynxMessageCodec
 
             case LynxMessageTypes.ClientRegister:
             case LynxMessageTypes.ClientHeartbeat:
+            case LynxMessageTypes.SnapshotRequest:
                 if (message.ClientId is null or <= 0)
                 {
                     error = $"{message.Type} requires clientId greater than zero.";
@@ -182,6 +184,9 @@ public static class LynxMessageCodec
 
     public static LynxMessage Heartbeat(long clientId) =>
         new(LynxMessageTypes.ClientHeartbeat, ClientId: clientId);
+
+    public static LynxMessage RequestSnapshot(long clientId) =>
+        new(LynxMessageTypes.SnapshotRequest, ClientId: clientId);
 
     public static LynxMessage SnapshotChunk(
         long snapshotId,

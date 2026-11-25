@@ -8,7 +8,7 @@ val localProperties = Properties().apply {
 }
 
 val lynxRelayHost =
-    localProperties.getProperty("lynx.relayHost") ?: "192.168.0.241"
+    localProperties.getProperty("lynx.relayHost") ?: "auto"
 val lynxRelayPort =
     localProperties.getProperty("lynx.relayPort")?.toIntOrNull() ?: 7777
 

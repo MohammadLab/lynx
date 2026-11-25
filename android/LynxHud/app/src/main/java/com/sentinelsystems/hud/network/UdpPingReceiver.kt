@@ -5,6 +5,7 @@ import com.sentinelsystems.hud.protocol.InboundMessage
 import com.sentinelsystems.hud.protocol.clientHeartbeatToJson
 import com.sentinelsystems.hud.protocol.clientRegisterToJson
 import com.sentinelsystems.hud.protocol.parseInboundMessage
+import com.sentinelsystems.hud.protocol.snapshotRequestToJson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
@@ -19,6 +20,7 @@ class UdpPingReceiver(
     private val relayPort: Int,
     private val clientId: Long,
     private val heartbeatIntervalMs: Long = 5_000,
+    private val snapshotTimeoutMs: Long = 3_000,
     private val maxPayloadBytes: Int = 4096
 ) {
     suspend fun run(
@@ -40,19 +42,36 @@ class UdpPingReceiver(
 
             var nextHeartbeatAt =
                 System.currentTimeMillis() + heartbeatIntervalMs
+            var pendingSnapshotId: Long? = null
+            var pendingChunkCount = 0
+            val receivedChunkIndexes = mutableSetOf<Int>()
+            var snapshotDeadlineAt = 0L
 
             val buffer = ByteArray(maxPayloadBytes + 1)
 
             while (currentCoroutineContext().isActive) {
-                if (System.currentTimeMillis() >= nextHeartbeatAt) {
+                val now = System.currentTimeMillis()
+                if (now >= nextHeartbeatAt) {
                     sendJson(
                         socket = socket,
                         json = clientHeartbeatToJson(clientId),
                         address = relayAddress,
                         port = relayPort
                     )
-                    nextHeartbeatAt =
-                        System.currentTimeMillis() + heartbeatIntervalMs
+                    nextHeartbeatAt = now + heartbeatIntervalMs
+                }
+
+                if (pendingSnapshotId != null && now >= snapshotDeadlineAt) {
+                    sendJson(
+                        socket = socket,
+                        json = snapshotRequestToJson(clientId),
+                        address = relayAddress,
+                        port = relayPort
+                    )
+                    onStatus("RX: snapshot timeout; resync requested")
+                    pendingSnapshotId = null
+                    pendingChunkCount = 0
+                    receivedChunkIndexes.clear()
                 }
 
                 val packet = DatagramPacket(buffer, buffer.size)
@@ -80,6 +99,23 @@ class UdpPingReceiver(
                     if (message == null) {
                         onStatus("RX: dropped malformed packet")
                         continue
+                    }
+
+                    if (message is InboundMessage.SnapshotChunk) {
+                        if (pendingSnapshotId != message.snapshotId) {
+                            pendingSnapshotId = message.snapshotId
+                            pendingChunkCount = message.chunkCount
+                            receivedChunkIndexes.clear()
+                            snapshotDeadlineAt =
+                                System.currentTimeMillis() + snapshotTimeoutMs
+                        }
+
+                        receivedChunkIndexes.add(message.chunkIndex)
+                        if (receivedChunkIndexes.size >= pendingChunkCount) {
+                            pendingSnapshotId = null
+                            pendingChunkCount = 0
+                            receivedChunkIndexes.clear()
+                        }
                     }
 
                     onMessage(message)

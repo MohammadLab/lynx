@@ -1,248 +1,319 @@
 # Prototype 0.4 — Remote AR Rendering
 
+## Status
+
+Prototype 0.4 is software-complete for the current one-tablet development setup.
+
+Completed:
+- authoritative multi-client relay.
+- Android self-registration and heartbeats.
+- stable per-install client identity.
+- remote PING_CREATE / PING_REMOVE rendering path.
+- snapshot-on-join and reconnect recovery.
+- state epoch/version ordering.
+- adaptive chunked snapshots.
+- missing-chunk timeout and explicit snapshot resync.
+- relay restart recovery.
+- LAN relay discovery with explicit-host fallback.
+- deferred SceneView marker retirement.
+- automated regression coverage for the full synchronization path.
+
+Physical validation already completed:
+- AprilTag calibration on the SM-X800.
+- calibrated remote network ping rendered in AR.
+- authoritative remote remove removed the ping without closing the app.
+- passive self-registration/heartbeat over real Wi-Fi.
+- automatic relay discovery with `lynx.relayHost=auto`, followed by registration and heartbeat with no desktop IP compiled into the APK.
+
+Physical validation still worth repeating when the tablet can be handled again:
+- calibrated create/remove after the new deferred marker-retirement cleanup.
+- two real Android devices calibrated to the same beacon, once a second device is available.
+
 ## Objective
 
-Receive authoritative shared-space ping state over UDP on Android and render it in the calibrated local ARCore frame.
+Receive authoritative shared-space overlay state over UDP and render it in the local calibrated ARCore frame while remaining deterministic under duplicate packets, reordering, temporary disconnects, client restart, relay restart, and incomplete snapshot delivery.
 
-## Data flow
+## Final data flow
 
-    remote sender
-    -> PING_CREATE shared coordinates
-    -> relay validates/stores
-    -> relay forwards accepted message
-    -> Android UDP receiver
-    -> JSON parse
-    -> remote ping state
-    -> beaconId check
-    -> sharedToLocal
+    local/remote command sender
+    -> PING_CREATE / PING_REMOVE
+    -> authoritative relay validates and mutates state
+    -> relay assigns stateEpoch + stateVersion
+    -> relay broadcasts accepted mutation
+    -> Android client validates ordering
+    -> shared coordinates
+    -> beaconId compatibility check
+    -> sharedToLocal()
     -> ARCore anchor
     -> Lynx billboard marker
 
-PING_REMOVE follows the same authoritative path and detaches the matching remote anchor.
+Recovery path:
 
-## Android receive port
+    client register / reconnect / version gap / snapshot timeout
+    -> authoritative snapshot request
+    -> byte-budgeted SNAPSHOT chunks
+    -> complete assembly only
+    -> replace client remote state
 
-The Android client listens on UDP port 7778.
+## Authoritative relay model
 
-The current relay still has a single forward endpoint. For the first Prototype 0.4 slice, point the relay directly at the tablet:
+The relay is the source of truth for active pings.
 
-    .\scripts\Run-Prototype04.ps1 -TabletIp <tablet-ip>
+Clients submit commands. The relay:
+- validates messages.
+- suppresses exact duplicate creates.
+- rejects conflicting ID reuse while an ID is active.
+- enforces sender ownership on remove.
+- stores accepted ping state.
+- assigns authoritative ordering metadata.
+- broadcasts only accepted mutations.
+- sends authoritative snapshots to joining/recovering clients.
 
-The tablet IP is DHCP-dependent and may change.
+The relay remains calibration-agnostic. `beaconId` is transported as data but spatial compatibility is enforced by the receiving client.
 
-## Receiver state rules
+## Client registration
 
-Remote pings and local pings have separate ownership.
-
-Local anchors:
-- created by the local PING button.
-- cleared by local CLEAR.
-- may be transmitted to the relay.
-
-Remote pings:
-- stored by ping ID.
-- rendered only when a compatible calibration exists.
-- duplicate identical creates are ignored.
-- mismatched beacon frames are not rendered.
-- remove messages detach only the matching remote anchor.
-- local CLEAR does not delete authoritative remote state.
-- recalibration detaches stale remote anchors and reprojects cached remote pings into the new local frame.
-
-## Self echo
-
-The local development sender ID is currently 1.
-
-If the relay echoes a locally-created ping back to the same Android client, the receiver treats it as confirmation instead of rendering a duplicate remote marker.
-
-Unique runtime client identity is still future work.
-
-## Pending-before-calibration behavior
-
-A valid remote PING_CREATE received before calibration is retained in remote state.
-
-After successful calibration, cached remote pings with the matching beacon ID are projected and rendered automatically.
-
-This prevents network state from being lost just because spatial calibration happened later.
-
-## Verification completed
-
-Real relay-to-tablet network smoke test on SM-X800:
-
-- tablet IP observed: 192.168.0.132.
-- Android receiver listened on UDP :7778.
-- PC sender created ping ID 4001, sender 99, beacon 0, shared (0.50, 0.00, 1.00).
-- relay accepted and forwarded the create to the tablet.
-- Android HUD reported:
-
-      RX: ping 4001 pending calibration
-      REMOTE 1 ping(s) 0 rendered
-
-- PC sender then sent PING_REMOVE for ID 4001.
-- relay accepted and forwarded the remove.
-- Android HUD reported:
-
-      RX: removed ping 4001
-      REMOTE 0 ping(s) 0 rendered
-
-This proves the real network receive, parse, store, and remove path.
-
-## Physical validation
-
-The calibrated network render/remove path was validated on the physical SM-X800 tablet.
-
-Observed result:
-- tablet calibrated successfully to beacon 0 with 4/4 plane hits.
-- remote PING_CREATE id=5002, sender=99, beacon=0, shared (0.50, 0.00, 1.00) was accepted by the relay.
-- Android reported `RX: rendered ping 5002` and `REMOTE 1 ping(s) 1 rendered`.
-- the remote Lynx AR marker rendered in the calibrated scene.
-- remote PING_REMOVE id=5002 was accepted and forwarded.
-- Android reported `RX: removed ping 5002` and `REMOTE 0 ping(s) 0 rendered`.
-- the Android process remained alive after remove.
-
-An earlier remove attempt exposed a native SceneView/Filament lifecycle crash:
-
-    Invalid texture still bound to MaterialInstance: Transparent Textured
-
-The crash happened because removing the Compose-rendered billboard could destroy its texture while Filament was still using it in the current frame.
-
-The Prototype 0.4 fix removes authoritative remote ping state and detaches the ARCore anchor, but retains the SceneView render object instead of destroying it immediately. This avoids the unsafe mid-frame texture teardown while correctly making the remote ping inactive.
-
-## Multi-client relay
-
-The relay now supports registered UDP clients instead of relying only on one hardcoded forward endpoint.
-
-Protocol additions:
+Protocol messages:
 - `CLIENT_REGISTER { clientId }`
 - `CLIENT_HEARTBEAT { clientId }`
-- `SNAPSHOT { pings[] }`
+- `SNAPSHOT_REQUEST { clientId }`
 
-Registration uses the source endpoint of the UDP datagram. Clients do not tell the relay what IP/port to send to; the relay learns the return endpoint from the socket that actually contacted it.
+Registration uses the source endpoint of the UDP datagram. A client never tells the relay which IP/port to send back to.
 
-The relay:
-- tracks client ID, UDP endpoint, and last-seen time.
-- refreshes the registration on heartbeat.
-- expires stale clients after the configured timeout.
-- broadcasts accepted PING_CREATE and PING_REMOVE messages to all active clients.
-- sends the authoritative ping snapshot immediately when a client registers.
-- retains the old `--forward` option temporarily for backward-compatible regression testing.
+The relay tracks:
+- stable client ID.
+- observed UDP endpoint.
+- last-seen timestamp.
 
-ViewerSim now registers from the same UDP socket it listens on, sends periodic heartbeats, applies snapshots, and continues to enforce beacon-frame isolation.
+Heartbeats refresh the registration. Stale clients expire after the configured timeout.
 
-Automated `scripts/Test-Prototype04.ps1` verifies:
-- two independently registered clients receive the same create.
-- a third late-joining client recovers the existing ping from snapshot.
-- remove is broadcast to all three clients.
-- all viewers end with zero stored pings.
-
-## Android registration and recovery
-
-Android now participates in the registered-client protocol directly.
-
-The Android UDP receiver:
-- binds UDP :7778.
-- sends CLIENT_REGISTER from the same socket it listens on.
-- sends CLIENT_HEARTBEAT every 5 seconds.
-- receives SNAPSHOT on registration.
-- replaces remote authoritative state from snapshot.
-- reprojects matching snapshot pings immediately when calibration is available.
-- retains snapshot pings as pending remote state when calibration is not yet available.
-- suppresses a self-echo only when the same ping is still active in local UI state; after app restart, authoritative pings with the same sender ID can be restored from snapshot.
-
-Passive physical validation succeeded with no camera interaction:
-- relay started with no `--forward` endpoint.
-- tablet registered itself as client 1 from `192.168.0.208:7778`.
-- relay sent an empty snapshot.
-- relay received the subsequent heartbeat from the same endpoint.
-
-Relay host/port are now Gradle BuildConfig values sourced from Android `local.properties` (`lynx.relayHost` and `lynx.relayPort`) rather than hardcoded inside ArScreen.kt.
+If a heartbeat arrives after a relay restart and the client ID is unknown to the new registry, the relay treats it as registration and sends a fresh snapshot.
 
 ## Stable client identity
 
-Android no longer uses the hardcoded client/sender ID 1.
+Android uses `ClientIdentityStore`.
 
-`ClientIdentityStore` generates a random positive 63-bit ID using `SecureRandom` on first launch and persists it in app-private SharedPreferences.
+On first launch it:
+- generates a random positive 63-bit value with `SecureRandom`.
+- stores it in app-private SharedPreferences.
+- reuses it across process restarts.
 
-For Prototype 0.4, that stable value is used as both:
-- `clientId` for relay registration/heartbeat.
+For Prototype 0.4 that value is used as both:
+- `clientId` for relay registration.
 - `senderId` for ping ownership.
 
-The ID survives app process restarts. Physical validation on the SM-X800 confirmed the same ID before and after a force-stop/relaunch:
+Physical validation on the SM-X800 confirmed the same identity before and after force-stop/relaunch.
 
-    4219839555241340694
+This identity is not authenticated. Cryptographic identity belongs to the later cyber/security phase.
 
-The HUD displays the final eight digits for quick debugging.
+## Authoritative ordering
 
-This is a prototype identity mechanism only. In the cyber/authentication phase, identity should come from authenticated credentials rather than locally-generated random state.
+Every accepted relay mutation carries:
+- `stateEpoch`.
+- `stateVersion`.
 
-## Disconnect and reconnect recovery
+`stateEpoch` identifies the current relay process/timeline.
 
-Automated `scripts/Test-Prototype04-Reconnect.ps1` validates registry expiry and authoritative state recovery.
+`stateVersion` starts at 0 for a new epoch and increments exactly once for each accepted `PING_CREATE` or `PING_REMOVE`.
 
-The regression proves:
-- client 201 registers and receives an empty snapshot.
-- ping 7001 is created while the client is online.
-- the client process is terminated.
-- after the heartbeat timeout, the relay expires the client from the registry.
-- ping 7002 is created while the client is offline and remains in authoritative relay state.
-- the same client ID restarts and re-registers.
-- the relay snapshot contains both pings.
-- the restarted viewer applies both authoritative pings without requiring replay of the original create events.
-- subsequent removes for both restored pings are applied and the viewer ends empty.
+Clients do not choose these values.
 
-This establishes the intended recovery rule: clients may disappear, but authoritative overlay state remains at the relay and is reconstructed from snapshot when they return.
+Client ordering rules:
+- same epoch + next version: apply.
+- same epoch + old/equal version: stale/duplicate, ignore.
+- same epoch + skipped version: do not guess; request snapshot.
+- older epoch: ignore.
+- newer epoch mutation: request snapshot before applying state.
+- newer epoch snapshot: replace old-epoch state even if its version resets to 0.
 
-## Snapshot chunking and authoritative ordering
+This prevents late UDP packets from rolling client state backward.
 
-Prototype 0.4 no longer sends the entire snapshot as one UDP datagram.
+## Snapshot format
 
-Every accepted relay mutation is assigned authoritative ordering metadata by the relay:
-- `stateEpoch`: identifies the current relay process/timeline.
-- `stateVersion`: increments once for every accepted PING_CREATE or PING_REMOVE within that epoch.
-
-Clients never choose these values. The relay re-serializes accepted mutations with its own epoch/version before broadcasting them.
-
-Snapshot packets now contain:
+Snapshot chunks carry:
 - `snapshotId`.
 - `stateEpoch`.
 - `stateVersion`.
 - `chunkIndex`.
 - `chunkCount`.
-- the chunk's ping list.
+- `pings[]`.
 
-The current ping snapshot is split into groups of at most 16 pings. The relay also checks the serialized chunk against the 4096-byte prototype payload ceiling before sending.
+Clients assemble by snapshot ID and authoritative epoch/version.
 
-Client snapshot assembly rules:
+Rules:
 - chunks may arrive out of order.
 - identical duplicate chunks are harmless.
-- local authoritative state is replaced only after every chunk is present.
-- an older epoch is rejected.
-- an older version in the current epoch is rejected.
-- a newer snapshot supersedes an incomplete older snapshot.
+- conflicting duplicate chunks trigger resync.
+- incomplete older snapshots may be superseded by newer snapshots.
+- client state is replaced only after every chunk is present.
 
-Diff ordering rules:
-- a contiguous mutation in the current epoch is applied and advances the local version.
-- a stale/duplicate mutation is ignored.
-- a version gap is not guessed through; the client re-registers to request a fresh snapshot.
-- a mutation from a newer relay epoch triggers snapshot resynchronization rather than direct application.
+## Adaptive UDP chunking
 
-Relay restart handling:
-- each relay process receives a newer startup epoch.
-- after restart, the client's next heartbeat is unknown to the new registry.
-- an unknown heartbeat is treated as registration and receives a fresh snapshot.
-- the newer epoch snapshot may reset `stateVersion` to 0 and still replace state from the older epoch.
-- transient UDP port-unreachable errors while the relay is down are tolerated rather than crashing the client.
+Snapshots are not split by a fixed ping count.
 
-Automated verification:
-- `Test-Prototype04-Chunking.ps1`: 35 pings -> three chunks -> complete 35-ping reconstruction -> version 36 diff.
-- `Test-Prototype04-Versioning.ps1`: deliberate version gap triggers snapshot resync; stale diff is ignored.
-- `Test-Prototype04-RelayRestart.ps1`: relay epoch A dies, epoch B starts, heartbeat re-registration sends a new empty snapshot and clears old client state.
-- C# and Android assembler unit tests cover out-of-order chunks, duplicates, stale epochs/versions, and newer-epoch version reset.
+`SnapshotChunker` greedily packs pings while measuring the actual serialized JSON size.
 
-## Known limitations
+Current snapshot payload budget:
 
-- relay host must still be configured per development machine; automatic discovery is future work.
-- random persisted identity is not authenticated and is not suitable as a security identity.
-- snapshot chunks are currently bounded by a fixed 16-ping count; future overlay types should use adaptive byte-budget chunking.
-- there is not yet a snapshot-chunk timeout/retransmission mechanism. If a chunk is lost and no later mutation exposes a version gap, an incomplete snapshot can remain pending until another resync occurs.
-- retained detached SceneView marker objects are a temporary workaround for the Filament texture teardown crash and should eventually get a safe deferred-destruction lifecycle.
-- no encrypted transport/authentication yet.
+    1200 bytes
+
+This is intentionally below the old 4096-byte application ceiling to reduce IP fragmentation on typical networks.
+
+The relay verifies every final serialized snapshot packet remains within the budget before sending it.
+
+## Missing-chunk recovery
+
+Android and ViewerSim track snapshot chunk receipt separately from semantic snapshot assembly.
+
+If a snapshot remains incomplete for 3 seconds:
+- the partial receipt is abandoned.
+- the client sends `SNAPSHOT_REQUEST` from its registered UDP socket.
+- the relay creates a fresh snapshot ID.
+- the fresh snapshot supersedes the incomplete one.
+
+This prevents a single lost UDP chunk from leaving the client permanently stuck.
+
+## Disconnect and reconnect recovery
+
+Client disappearance does not delete relay state.
+
+Verified sequence:
+
+    client online
+    -> ping 7001 created
+    -> client disconnects
+    -> registry entry expires
+    -> ping 7002 created while client is offline
+    -> same client ID reconnects
+    -> snapshot contains 7001 + 7002
+    -> client reconstructs authoritative state
+
+## Relay restart recovery
+
+A relay restart creates a new `stateEpoch` and an empty in-memory authoritative state.
+
+The client keeps heartbeating. The new relay does not know the client ID, so the heartbeat causes a new snapshot to be sent.
+
+A newer-epoch snapshot is allowed to reset the client from an older nonzero version to the new epoch at version 0.
+
+Transient UDP socket errors while the relay is down are treated as recoverable rather than fatal.
+
+Relay state persistence across process restarts is intentionally not part of Prototype 0.4.
+
+## Relay discovery
+
+Android defaults to:
+
+    lynx.relayHost=auto
+    lynx.relayPort=7777
+
+Discovery uses the same UDP service port as normal Lynx traffic.
+
+Flow:
+1. Android sends `LYNX_DISCOVER_V1` to LAN broadcast targets on the configured relay port.
+2. If broadcast is filtered, Android performs a bounded /24 unicast sweep on the local subnet.
+3. A relay replies `LYNX_RELAY_V1|<port>`.
+4. Android uses the response source IP plus advertised port for registration and all subsequent sends.
+
+An explicit `lynx.relayHost=<IPv4>` in `local.properties` bypasses discovery.
+
+Discovery is only a bootstrap mechanism. It does not establish trust; authenticated relay identity belongs to the cyber/security phase.
+
+### Windows Firewall note
+
+LAN discovery and normal client traffic require Windows Firewall to allow inbound `lynxrelay.exe` traffic on the active network profile.
+
+During closeout testing the host firewall state changed while diagnosing discovery. Once the current rules reported `lynxrelay.exe` as Inbound Allow on the Public profile, physical tablet auto-discovery succeeded.
+
+`scripts/Run-Prototype04.ps1` performs a preflight check and warns if an enabled inbound block rule for `lynxrelay.exe` is present.
+
+## Android remote state rules
+
+Remote pings:
+- are stored by ping ID.
+- may exist before calibration.
+- render only when a compatible beacon calibration exists.
+- are reprojected after calibration/recalibration.
+- are unaffected by local CLEAR.
+- are replaced from complete authoritative snapshots.
+
+Self-echo handling:
+- a locally active ping echoed by the relay is treated as authoritative confirmation, not rendered twice.
+- after app restart, old authoritative pings from the same sender ID may return from snapshot because they are no longer live local UI objects.
+
+## SceneView / Filament marker lifecycle
+
+The first physical remote remove exposed a native Filament abort:
+
+    Invalid texture still bound to MaterialInstance: Transparent Textured
+
+Immediate Compose removal could dispose the billboard texture while Filament was still using it in the current render frame.
+
+Final 0.4 lifecycle:
+- active local/remote ownership is updated immediately.
+- removed/replaced anchors are detached immediately.
+- rendered anchors remain in a shared render queue for three additional frames plus a short guard delay.
+- only then are their SceneView nodes removed and disposed.
+- the same retirement path is used for remote remove, snapshot replacement, recalibration, and local CLEAR.
+
+This avoids both immediate native teardown and the earlier memory leak where detached remote render objects were retained forever.
+
+## Physical validation completed
+
+On the SM-X800:
+- AprilTag 36h11 ID 0 calibration reached 4/4 ARCore plane hits.
+- a network `PING_CREATE` from sender 99 at shared `(0.50, 0.00, 1.00)` reached Android through the relay.
+- Android reported `RX: rendered ping 5002`.
+- the Lynx marker appeared in calibrated AR.
+- authoritative `PING_REMOVE 5002` reached Android.
+- Android reported zero remote pings and stayed alive after the original Filament crash was fixed.
+- client identity persisted across force-stop/relaunch.
+- client self-registration and heartbeat were validated over real Wi-Fi.
+- automatic relay discovery was physically validated after the Windows Firewall rule returned to Inbound Allow: the tablet at `192.168.0.208` discovered the desktop relay, received the discovery response, registered from UDP `:7778`, and began heartbeating without a configured desktop IP.
+
+## Automated verification
+
+Primary command:
+
+    .\scripts\Test-Prototype04-All.ps1
+
+With a connected Android device:
+
+    .\scripts\Test-Prototype04-All.ps1 -ConnectedAndroid
+
+Coverage includes:
+- .NET protocol/relay tests.
+- Android unit/build tests.
+- optional Android instrumentation tests.
+- multi-client fan-out.
+- late-join snapshot recovery.
+- disconnect/reconnect recovery.
+- adaptive snapshot chunking and byte budget.
+- version-gap/stale-packet handling.
+- relay restart / epoch recovery.
+- missing snapshot chunk timeout and resync.
+- relay discovery protocol.
+
+Individual regressions:
+- `Test-Prototype04.ps1`.
+- `Test-Prototype04-Reconnect.ps1`.
+- `Test-Prototype04-Chunking.ps1`.
+- `Test-Prototype04-Versioning.ps1`.
+- `Test-Prototype04-RelayRestart.ps1`.
+- `Test-Prototype04-SnapshotTimeout.ps1`.
+- `Test-Prototype04-Discovery.ps1`.
+
+## Remaining items outside 0.4 scope
+
+These are intentionally deferred rather than unfinished 0.4 work:
+- encryption and authenticated transport.
+- authenticated device/role identity.
+- replay protection.
+- audit-log integrity.
+- persistent relay state across relay process restarts.
+- operational packet-loss/latency/reordering stress campaigns.
+- authenticated discovery/trust.
+
+Hardware-only validation still pending:
+- repeat calibrated create/remove with the deferred marker-retirement implementation.
+- real two-Android-device shared-location test when a second ARCore device is available.

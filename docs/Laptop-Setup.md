@@ -62,45 +62,58 @@ Full Prototype 0.3 software verification:
 .\scripts\Test-Prototype03.ps1
 ```
 
-## Important network note
+## Network configuration
 
-The Android relay destination is machine-local configuration, not source code.
+Android now supports automatic relay discovery.
 
-In `android/LynxHud/local.properties`, add:
+Default behavior:
 
 ```text
-lynx.relayHost=<development-machine IPv4>
+lynx.relayHost=auto
 lynx.relayPort=7777
 ```
 
-Example:
+With `auto`, Android first tries LAN broadcast discovery on UDP 7777, then falls back to a bounded /24 unicast probe if broadcast is filtered.
+
+To bypass discovery, add an explicit host in `android/LynxHud/local.properties`:
 
 ```text
 lynx.relayHost=192.168.0.243
 lynx.relayPort=7777
 ```
 
-`local.properties` is ignored by Git, so changing networks or machines does not create source changes.
+`local.properties` is ignored by Git, so machine/network-specific overrides do not create source changes.
 
-The relay host must be reachable from the Android device on the same network. Automatic relay discovery is future work.
+Windows Firewall must allow inbound UDP traffic to `LynxRelay` on the local network. `scripts/Run-Prototype04.ps1` warns if an enabled inbound block rule for `lynxrelay.exe` is detected.
 
 ## Current checkpoint
 
-Prototype 0.2:
-- typed UDP ping create/remove transport
-- authoritative relay
-- duplicate/conflict/ownership handling
-- ViewerSim
-- transport regression tests
+Prototype 0.2: complete.
 
-Prototype 0.3:
-- AprilTag 36h11 ID 0 detection
-- shared spatial calibration frame
-- local-to-shared and shared-to-local transforms
-- calibration diagnostics HUD
-- OpenCV corner extraction crash fix
-- receiver-side shared-to-local projection helper
-- SIM REMOTE one-device receiver rendering path
-- calibration/orientation/unit/instrumentation tests
+Prototype 0.3: complete and physically validated on the SM-X800.
 
-Physical AprilTag calibration is still the remaining real-world validation step.
+Prototype 0.4 software scope:
+- registered multi-client relay.
+- stable Android identity.
+- remote calibrated AR rendering.
+- snapshots and reconnect recovery.
+- authoritative state epochs/versions.
+- adaptive 1200-byte snapshot chunking.
+- missing-chunk timeout / `SNAPSHOT_REQUEST` recovery.
+- relay restart recovery.
+- auto relay discovery with explicit-host override.
+- deferred SceneView anchor retirement.
+
+Full software verification:
+
+```powershell
+.\scripts\Test-Prototype04-All.ps1
+```
+
+Include connected Android instrumentation:
+
+```powershell
+.\scripts\Test-Prototype04-All.ps1 -ConnectedAndroid
+```
+
+Hardware follow-up remains for a deferred-cleanup calibrated retest and a true two-Android-device shared-location test once a second ARCore device is available.

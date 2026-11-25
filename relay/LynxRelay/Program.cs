@@ -4,7 +4,7 @@ using Lynx.Protocol;
 using Lynx.Relay.Core;
 
 const int MaxPayloadBytes = 4096;
-const int SnapshotPingsPerChunk = 16;
+const int SnapshotPayloadBudgetBytes = 1200;
 var listenPort = 7777;
 IPEndPoint? legacyForwardTo = null;
 var clientTimeout = TimeSpan.FromSeconds(15);
@@ -38,8 +38,9 @@ Console.WriteLine($"[Relay] Client timeout: {clientTimeout.TotalSeconds:F0}s");
 if (legacyForwardTo is not null)
     Console.WriteLine($"[Relay] Legacy forward: {legacyForwardTo}");
 Console.WriteLine($"[Relay] Max payload: {MaxPayloadBytes} bytes");
-Console.WriteLine($"[Relay] Snapshot chunk size: {SnapshotPingsPerChunk} pings");
+Console.WriteLine($"[Relay] Snapshot payload budget: {SnapshotPayloadBudgetBytes} bytes");
 Console.WriteLine($"[Relay] State epoch: {stateEpoch}");
+Console.WriteLine($"[Relay] Discovery shares UDP :{listenPort}");
 Console.WriteLine("[Relay] Ctrl+C to stop.");
 Console.WriteLine();
 
@@ -49,6 +50,18 @@ while (true)
     var payload = received.Buffer;
     var from = received.RemoteEndPoint;
     var now = DateTimeOffset.UtcNow;
+
+    var discoveryRequest = System.Text.Encoding.UTF8.GetBytes(
+        RelayDiscoveryProtocol.Request);
+    if (payload.AsSpan().SequenceEqual(discoveryRequest))
+    {
+        var response = System.Text.Encoding.UTF8.GetBytes(
+            RelayDiscoveryProtocol.CreateResponse(listenPort));
+        await udp.SendAsync(response, from);
+        Console.WriteLine(
+            $"[Relay] DISCOVERY reply to {from} relayPort={listenPort}");
+        continue;
+    }
 
     var expired = clients.RemoveExpired(now, clientTimeout);
     if (expired > 0)
@@ -90,6 +103,14 @@ while (true)
             {
                 Console.WriteLine($"[Relay] HEARTBEAT client={clientId} endpoint={from} active={clients.Count}");
             }
+            break;
+        }
+
+        case LynxMessageTypes.SnapshotRequest:
+        {
+            var clientId = message.ClientId!.Value;
+            clients.RegisterOrRefresh(clientId, from, now);
+            await SendSnapshot(from, clientId, "SNAPSHOT-REQUEST");
             break;
         }
 
@@ -151,21 +172,21 @@ while (true)
     }
 }
 
+
 async Task SendSnapshot(IPEndPoint endpoint, long clientId, string reason)
 {
     var snapshotPings = pings.Snapshot();
     var snapshotId = nextSnapshotId++;
-    var chunkCount = Math.Max(
-        1,
-        (int)Math.Ceiling(snapshotPings.Count / (double)SnapshotPingsPerChunk));
+    var chunks = SnapshotChunker.ChunkBySerializedBudget(
+        snapshotPings,
+        snapshotId,
+        stateEpoch,
+        stateVersion,
+        SnapshotPayloadBudgetBytes);
+    var chunkCount = chunks.Count;
 
     for (var chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++)
     {
-        var chunkPings = snapshotPings
-            .Skip(chunkIndex * SnapshotPingsPerChunk)
-            .Take(SnapshotPingsPerChunk)
-            .ToArray();
-
         var snapshotPayload = LynxMessageCodec.Serialize(
             LynxMessageCodec.SnapshotChunk(
                 snapshotId,
@@ -173,10 +194,14 @@ async Task SendSnapshot(IPEndPoint endpoint, long clientId, string reason)
                 stateVersion,
                 chunkIndex,
                 chunkCount,
-                chunkPings));
+                chunks[chunkIndex]));
 
-        if (snapshotPayload.Length > MaxPayloadBytes)
-            throw new InvalidOperationException("Snapshot chunk exceeded MaxPayloadBytes.");
+        if (snapshotPayload.Length > SnapshotPayloadBudgetBytes)
+            throw new InvalidOperationException("Snapshot chunk exceeded payload budget.");
+
+        Console.WriteLine(
+            $"[Relay] SNAPSHOT chunk={chunkIndex + 1}/{chunkCount} " +
+            $"bytes={snapshotPayload.Length} snapshotId={snapshotId}");
 
         await udp.SendAsync(snapshotPayload, endpoint);
     }
