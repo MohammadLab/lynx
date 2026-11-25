@@ -138,15 +138,20 @@ fun ArScreen() {
     }
 
     val localSenderId = 1L
-    val pcHost = "192.168.0.241"
-    val pcPort = 7777
+    val pcHost = BuildConfig.LYNX_RELAY_HOST
+    val pcPort = BuildConfig.LYNX_RELAY_PORT
     val receivePort = 7778
 
     val currentCalibrationState = rememberUpdatedState(calibration)
     val currentSessionState = rememberUpdatedState(latestSession)
 
     LaunchedEffect(Unit) {
-        val receiver = UdpPingReceiver(receivePort)
+        val receiver = UdpPingReceiver(
+            listenPort = receivePort,
+            relayHost = pcHost,
+            relayPort = pcPort,
+            clientId = localSenderId
+        )
 
         receiver.run(
             onMessage = { message ->
@@ -155,7 +160,11 @@ fun ArScreen() {
                         is InboundMessage.PingCreate -> {
                             val ping = message.ping
 
-                            if (ping.senderId == localSenderId) {
+                            val isLiveLocalPing =
+                                ping.senderId == localSenderId &&
+                                    pings.any { it.id == ping.id }
+
+                            if (isLiveLocalPing) {
                                 udpStatus = "RX: own ping ${ping.id} confirmed"
                                 return@withContext
                             }
@@ -196,7 +205,11 @@ fun ArScreen() {
                         }
 
                         is InboundMessage.PingRemove -> {
-                            if (message.senderId == localSenderId) {
+                            val isLiveLocalPing =
+                                message.senderId == localSenderId &&
+                                    pings.any { it.id == message.pingId }
+
+                            if (isLiveLocalPing) {
                                 udpStatus = "RX: own remove ${message.pingId} confirmed"
                                 return@withContext
                             }
@@ -204,6 +217,45 @@ fun ArScreen() {
                             remotePings.remove(message.pingId)
                             remoteAnchors[message.pingId]?.detach()
                             udpStatus = "RX: removed ping ${message.pingId}"
+                        }
+
+                        is InboundMessage.Snapshot -> {
+                            remoteAnchors.values.forEach { it.detach() }
+                            remotePings.clear()
+
+                            val cal = currentCalibrationState.value
+                            val session = currentSessionState.value
+
+                            message.pings.forEach { ping ->
+                                val isLiveLocalPing =
+                                    ping.senderId == localSenderId &&
+                                        pings.any { it.id == ping.id }
+
+                                if (isLiveLocalPing) {
+                                    return@forEach
+                                }
+
+                                remotePings[ping.id] = ping
+
+                                if (cal != null && session != null) {
+                                    val projection =
+                                        RemotePingProjector.project(ping, cal)
+
+                                    if (projection != null) {
+                                        val local = projection.localPosition
+                                        remoteAnchors[ping.id] = session.createAnchor(
+                                            Pose.makeTranslation(
+                                                local.x,
+                                                local.y,
+                                                local.z
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+
+                            udpStatus =
+                                "RX: snapshot ${remotePings.size} ping(s)"
                         }
                     }
                 }

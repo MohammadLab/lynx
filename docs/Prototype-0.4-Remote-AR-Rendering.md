@@ -134,10 +134,32 @@ Automated `scripts/Test-Prototype04.ps1` verifies:
 - remove is broadcast to all three clients.
 - all viewers end with zero stored pings.
 
+## Android registration and recovery
+
+Android now participates in the registered-client protocol directly.
+
+The Android UDP receiver:
+- binds UDP :7778.
+- sends CLIENT_REGISTER from the same socket it listens on.
+- sends CLIENT_HEARTBEAT every 5 seconds.
+- receives SNAPSHOT on registration.
+- replaces remote authoritative state from snapshot.
+- reprojects matching snapshot pings immediately when calibration is available.
+- retains snapshot pings as pending remote state when calibration is not yet available.
+- suppresses a self-echo only when the same ping is still active in local UI state; after app restart, authoritative pings with the same sender ID can be restored from snapshot.
+
+Passive physical validation succeeded with no camera interaction:
+- relay started with no `--forward` endpoint.
+- tablet registered itself as client 1 from `192.168.0.208:7778`.
+- relay sent an empty snapshot.
+- relay received the subsequent heartbeat from the same endpoint.
+
+Relay host/port are now Gradle BuildConfig values sourced from Android `local.properties` (`lynx.relayHost` and `lynx.relayPort`) rather than hardcoded inside ArScreen.kt.
+
 ## Known limitations
 
-- Android has not yet been migrated to CLIENT_REGISTER / heartbeat / SNAPSHOT; current physical testing still uses relay `--forward`.
-- Android local sender ID is hardcoded to 1.
-- relay host configuration is still prototype configuration.
+- Android local sender/client ID is still hardcoded to 1.
+- relay host must still be configured per development machine; automatic discovery is future work.
 - snapshot currently contains the complete ping set in one UDP datagram; chunking is future work if state grows.
+- retained detached SceneView marker objects are a temporary workaround for the Filament texture teardown crash and should eventually get a safe deferred-destruction lifecycle.
 - no encrypted transport/authentication yet.

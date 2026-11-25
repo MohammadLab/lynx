@@ -3,6 +3,7 @@ package com.sentinelsystems.hud.protocol
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -35,6 +36,29 @@ class InboundMessageInstrumentedTest {
         require(message is InboundMessage.PingRemove)
         assertEquals(123L, message.pingId)
         assertEquals(9L, message.senderId)
+    }
+
+    @Test
+    fun parsesSnapshot() {
+        val message = parseInboundMessage(
+            """{"type":"SNAPSHOT","pings":[{"id":1,"senderId":7,"beaconId":0,"x":1.0,"y":2.0,"z":3.0,"createdAt":1000},{"id":2,"senderId":8,"beaconId":0,"x":4.0,"y":5.0,"z":6.0,"createdAt":2000}]}"""
+        )
+
+        require(message is InboundMessage.Snapshot)
+        assertEquals(2, message.pings.size)
+        assertEquals(1L, message.pings[0].id)
+        assertEquals(2L, message.pings[1].id)
+    }
+
+    @Test
+    fun createsRegisterAndHeartbeatJson() {
+        val register = clientRegisterToJson(1L)
+        val heartbeat = clientHeartbeatToJson(1L)
+
+        assertTrue(register.contains("\"type\":\"CLIENT_REGISTER\""))
+        assertTrue(register.contains("\"clientId\":1"))
+        assertTrue(heartbeat.contains("\"type\":\"CLIENT_HEARTBEAT\""))
+        assertTrue(heartbeat.contains("\"clientId\":1"))
     }
 
     @Test

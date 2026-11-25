@@ -1,3 +1,17 @@
+import java.util.Properties
+
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use { load(it) }
+    }
+}
+
+val lynxRelayHost =
+    localProperties.getProperty("lynx.relayHost") ?: "192.168.0.241"
+val lynxRelayPort =
+    localProperties.getProperty("lynx.relayPort")?.toIntOrNull() ?: 7777
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -19,6 +33,8 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "LYNX_RELAY_HOST", "\"$lynxRelayHost\"")
+        buildConfigField("int", "LYNX_RELAY_PORT", lynxRelayPort.toString())
     }
 
     buildTypes {
@@ -36,6 +52,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

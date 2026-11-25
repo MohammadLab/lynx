@@ -64,17 +64,25 @@ Full Prototype 0.3 software verification:
 
 ## Important network note
 
-The Android app currently uses a development-machine UDP host configured in `ArScreen.kt`.
+The Android relay destination is machine-local configuration, not source code.
 
-Current value:
+In `android/LynxHud/local.properties`, add:
 
 ```text
-192.168.0.241:7777
+lynx.relayHost=<development-machine IPv4>
+lynx.relayPort=7777
 ```
 
-That address belongs to the current desktop network and may not be valid on the laptop or another Wi-Fi network. Before doing Android-to-relay network testing from the laptop, change `pcHost` to the laptop's IPv4 address on the same network as the Android device.
+Example:
 
-This hardcoded host is known prototype technical debt and should later become runtime configuration/discovery.
+```text
+lynx.relayHost=192.168.0.243
+lynx.relayPort=7777
+```
+
+`local.properties` is ignored by Git, so changing networks or machines does not create source changes.
+
+The relay host must be reachable from the Android device on the same network. Automatic relay discovery is future work.
 
 ## Current checkpoint
 
