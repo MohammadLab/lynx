@@ -35,6 +35,9 @@ for (var i = 0; i < args.Length; i++)
 }
 
 var receivedPings = new Dictionary<long, PingMessage>();
+var snapshotAssembler = new SnapshotAssembler();
+long appliedEpoch = 0;
+long appliedVersion = 0;
 using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, listenPort));
 using var cts = new CancellationTokenSource();
 
@@ -84,6 +87,13 @@ try
         {
             break;
         }
+        catch (SocketException ex)
+        {
+            Console.WriteLine(
+                $"[ViewerSim] UDP receive transient error {ex.SocketErrorCode}; continuing");
+            await Task.Delay(100, cts.Token);
+            continue;
+        }
 
         if (!LynxMessageCodec.TryParse(
                 received.Buffer,
@@ -100,21 +110,76 @@ try
         {
             case LynxMessageTypes.Snapshot:
             {
-                receivedPings.Clear();
+                var result = snapshotAssembler.Add(message, appliedEpoch, appliedVersion);
 
-                foreach (var ping in message.Pings!)
+                if (result.Status == SnapshotAssemblyStatus.Stale)
+                {
+                    Console.WriteLine(
+                        $"[ViewerSim] STALE snapshot ignored version={message.StateVersion}");
+                    break;
+                }
+
+                if (result.Status == SnapshotAssemblyStatus.Conflict)
+                {
+                    Console.WriteLine("[ViewerSim] SNAPSHOT conflict; requesting fresh snapshot");
+                    snapshotAssembler.Reset();
+                    await SendToRelay(LynxMessageCodec.RegisterClient(clientId));
+                    break;
+                }
+
+                if (result.Status != SnapshotAssemblyStatus.Complete)
+                {
+                    Console.WriteLine(
+                        $"[ViewerSim] SNAPSHOT chunk {message.ChunkIndex! + 1}/{message.ChunkCount} " +
+                        $"version={message.StateVersion}");
+                    break;
+                }
+
+                receivedPings.Clear();
+                foreach (var ping in result.Pings!)
                 {
                     if (ping.BeaconId == expectedBeaconId)
                         receivedPings[ping.Id] = ping;
                 }
 
+                appliedEpoch = result.StateEpoch!.Value;
+                appliedVersion = result.StateVersion!.Value;
                 Console.WriteLine(
-                    $"[ViewerSim] SNAPSHOT applied total={receivedPings.Count}");
+                    $"[ViewerSim] SNAPSHOT applied total={receivedPings.Count} " +
+                    $"epoch={appliedEpoch} version={appliedVersion}");
                 break;
             }
 
             case LynxMessageTypes.PingCreate:
             {
+                var epoch = message.StateEpoch;
+                var version = message.StateVersion;
+                if (epoch is not null && version is not null)
+                {
+                    if (epoch < appliedEpoch ||
+                        (epoch == appliedEpoch && version <= appliedVersion))
+                    {
+                        Console.WriteLine(
+                            $"[ViewerSim] STALE create ignored epoch={epoch} version={version}");
+                        break;
+                    }
+                    if (epoch > appliedEpoch || version > appliedVersion + 1)
+                    {
+                        Console.WriteLine(
+                            $"[ViewerSim] VERSION GAP local={appliedEpoch}:{appliedVersion} " +
+                            $"received={epoch}:{version}; requesting snapshot");
+                        snapshotAssembler.Reset();
+                        await SendToRelay(LynxMessageCodec.RegisterClient(clientId));
+                        break;
+                    }
+                }
+
+                if (epoch is not null && version is not null)
+                {
+                    appliedEpoch = epoch.Value;
+                    appliedVersion = version.Value;
+                }
+
                 var ping = message.Ping!;
 
                 if (ping.BeaconId != expectedBeaconId)
@@ -133,7 +198,6 @@ try
                 }
 
                 receivedPings[ping.Id] = ping;
-
                 Console.WriteLine("[ViewerSim] REMOTE PING RECEIVED");
                 Console.WriteLine($"  id        : {ping.Id}");
                 Console.WriteLine($"  senderId  : {ping.SenderId}");
@@ -148,6 +212,34 @@ try
 
             case LynxMessageTypes.PingRemove:
             {
+                var epoch = message.StateEpoch;
+                var version = message.StateVersion;
+                if (epoch is not null && version is not null)
+                {
+                    if (epoch < appliedEpoch ||
+                        (epoch == appliedEpoch && version <= appliedVersion))
+                    {
+                        Console.WriteLine(
+                            $"[ViewerSim] STALE remove ignored epoch={epoch} version={version}");
+                        break;
+                    }
+                    if (epoch > appliedEpoch || version > appliedVersion + 1)
+                    {
+                        Console.WriteLine(
+                            $"[ViewerSim] VERSION GAP local={appliedEpoch}:{appliedVersion} " +
+                            $"received={epoch}:{version}; requesting snapshot");
+                        snapshotAssembler.Reset();
+                        await SendToRelay(LynxMessageCodec.RegisterClient(clientId));
+                        break;
+                    }
+                }
+
+                if (epoch is not null && version is not null)
+                {
+                    appliedEpoch = epoch.Value;
+                    appliedVersion = version.Value;
+                }
+
                 var pingId = message.PingId!.Value;
 
                 if (!receivedPings.Remove(pingId))

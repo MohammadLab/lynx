@@ -57,12 +57,12 @@ try {
 
     if ($relayText -notmatch "REGISTER client=101") { throw "Client 101 did not register." }
     if ($relayText -notmatch "REGISTER client=102") { throw "Client 102 did not register." }
-    if ($relayText -notmatch "broadcast PING_CREATE id=6001 to 2 endpoint\(s\)") { throw "Relay did not fan out create to two clients." }
+    if ($relayText -notmatch "broadcast PING_CREATE id=6001 version=\d+ to 2 endpoint\(s\)") { throw "Relay did not fan out create to two clients." }
     if ($viewer1Text -notmatch "REMOTE PING RECEIVED") { throw "Viewer 101 did not receive create." }
     if ($viewer2Text -notmatch "REMOTE PING RECEIVED") { throw "Viewer 102 did not receive create." }
     if ($relayText -notmatch "REGISTER client=103.*snapshot=1") { throw "Late client did not register against one-ping state." }
     if ($viewer3Text -notmatch "SNAPSHOT applied total=1") { throw "Late client did not recover ping from snapshot." }
-    if ($relayText -notmatch "broadcast PING_REMOVE id=6001 to 3 endpoint\(s\)") { throw "Relay did not fan out remove to three clients." }
+    if ($relayText -notmatch "broadcast PING_REMOVE id=6001 version=\d+ to 3 endpoint\(s\)") { throw "Relay did not fan out remove to three clients." }
     if ($viewer1Text -notmatch "REMOTE PING REMOVED id=6001") { throw "Viewer 101 did not apply remove." }
     if ($viewer2Text -notmatch "REMOTE PING REMOVED id=6001") { throw "Viewer 102 did not apply remove." }
     if ($viewer3Text -notmatch "REMOTE PING REMOVED id=6001") { throw "Viewer 103 did not apply remove." }

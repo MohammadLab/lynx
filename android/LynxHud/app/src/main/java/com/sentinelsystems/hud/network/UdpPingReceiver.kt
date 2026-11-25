@@ -85,6 +85,9 @@ class UdpPingReceiver(
                     onMessage(message)
                 } catch (_: java.net.SocketTimeoutException) {
                     // Wake periodically for heartbeat/cancellation.
+                } catch (e: java.net.SocketException) {
+                    Log.w("LynxReceiver", "Transient UDP receive error", e)
+                    onStatus("RX: transient network error; retrying")
                 }
             }
         }

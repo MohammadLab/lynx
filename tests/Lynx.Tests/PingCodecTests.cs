@@ -166,11 +166,23 @@ public sealed class PingCodecTests
             new PingMessage(2, 8, 0, 4f, 5f, 6f, 2000)
         };
 
-        var bytes = LynxMessageCodec.Serialize(LynxMessageCodec.Snapshot(pings));
+        var bytes = LynxMessageCodec.Serialize(
+            LynxMessageCodec.SnapshotChunk(
+                snapshotId: 55,
+                stateEpoch: 100,
+                stateVersion: 7,
+                chunkIndex: 0,
+                chunkCount: 1,
+                pings));
         var ok = LynxMessageCodec.TryParse(bytes, out var parsed, out var error);
 
         Assert.True(ok, error);
         Assert.Equal(LynxMessageTypes.Snapshot, parsed!.Type);
+        Assert.Equal(55L, parsed.SnapshotId);
+        Assert.Equal(100L, parsed.StateEpoch);
+        Assert.Equal(7L, parsed.StateVersion);
+        Assert.Equal(0, parsed.ChunkIndex);
+        Assert.Equal(1, parsed.ChunkCount);
         Assert.Equal(pings, parsed.Pings);
     }
 }

@@ -4,9 +4,27 @@ import com.sentinelsystems.hud.model.Ping
 import org.json.JSONObject
 
 sealed interface InboundMessage {
-    data class PingCreate(val ping: Ping) : InboundMessage
-    data class PingRemove(val pingId: Long, val senderId: Long) : InboundMessage
-    data class Snapshot(val pings: List<Ping>) : InboundMessage
+    data class PingCreate(
+        val ping: Ping,
+        val stateEpoch: Long?,
+        val stateVersion: Long?
+    ) : InboundMessage
+
+    data class PingRemove(
+        val pingId: Long,
+        val senderId: Long,
+        val stateEpoch: Long?,
+        val stateVersion: Long?
+    ) : InboundMessage
+
+    data class SnapshotChunk(
+        val snapshotId: Long,
+        val stateEpoch: Long,
+        val stateVersion: Long,
+        val chunkIndex: Int,
+        val chunkCount: Int,
+        val pings: List<Ping>
+    ) : InboundMessage
 }
 
 fun parseInboundMessage(json: String): InboundMessage? {
@@ -15,12 +33,18 @@ fun parseInboundMessage(json: String): InboundMessage? {
     return when (root.optString("type")) {
         "PING_CREATE" -> {
             val obj = root.optJSONObject("ping") ?: return null
-            InboundMessage.PingCreate(parsePing(obj))
+            InboundMessage.PingCreate(
+                ping = parsePing(obj),
+                stateEpoch = root.optLongOrNull("stateEpoch"),
+                stateVersion = root.optLongOrNull("stateVersion")
+            )
         }
 
         "PING_REMOVE" -> InboundMessage.PingRemove(
             pingId = root.getLong("pingId"),
-            senderId = root.getLong("senderId")
+            senderId = root.getLong("senderId"),
+            stateEpoch = root.optLongOrNull("stateEpoch"),
+            stateVersion = root.optLongOrNull("stateVersion")
         )
 
         "SNAPSHOT" -> {
@@ -30,12 +54,22 @@ fun parseInboundMessage(json: String): InboundMessage? {
                     add(parsePing(array.getJSONObject(index)))
                 }
             }
-            InboundMessage.Snapshot(pings)
+            InboundMessage.SnapshotChunk(
+                snapshotId = root.getLong("snapshotId"),
+                stateEpoch = root.getLong("stateEpoch"),
+                stateVersion = root.getLong("stateVersion"),
+                chunkIndex = root.getInt("chunkIndex"),
+                chunkCount = root.getInt("chunkCount"),
+                pings = pings
+            )
         }
 
         else -> null
     }
 }
+
+private fun JSONObject.optLongOrNull(name: String): Long? =
+    if (has(name) && !isNull(name)) getLong(name) else null
 
 private fun parsePing(obj: JSONObject): Ping = Ping(
     id = obj.getLong("id"),

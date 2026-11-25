@@ -54,6 +54,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import com.sentinelsystems.hud.network.UdpPingSender
 import com.sentinelsystems.hud.network.UdpPingReceiver
 import com.sentinelsystems.hud.protocol.InboundMessage
+import com.sentinelsystems.hud.protocol.SnapshotAssembler
+import com.sentinelsystems.hud.protocol.SnapshotAssemblyStatus
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -147,8 +149,12 @@ fun ArScreen() {
 
     val currentCalibrationState = rememberUpdatedState(calibration)
     val currentSessionState = rememberUpdatedState(latestSession)
+    val snapshotAssembler = remember { SnapshotAssembler() }
+    var appliedStateEpoch by remember { mutableStateOf(0L) }
+    var appliedStateVersion by remember { mutableStateOf(0L) }
+    var receiverEpoch by remember { mutableStateOf(0) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(receiverEpoch) {
         val receiver = UdpPingReceiver(
             listenPort = receivePort,
             relayHost = pcHost,
@@ -161,20 +167,46 @@ fun ArScreen() {
                 withContext(Dispatchers.Main.immediate) {
                     when (message) {
                         is InboundMessage.PingCreate -> {
-                            val ping = message.ping
+                            val epoch = message.stateEpoch
+                            val version = message.stateVersion
+                            if (epoch != null && version != null) {
+                                if (
+                                    epoch < appliedStateEpoch ||
+                                    (epoch == appliedStateEpoch &&
+                                        version <= appliedStateVersion)
+                                ) {
+                                    udpStatus = "RX: stale create $epoch:$version ignored"
+                                    return@withContext
+                                }
+                                if (
+                                    epoch > appliedStateEpoch ||
+                                    version > appliedStateVersion + 1
+                                ) {
+                                    udpStatus =
+                                        "RX: version gap ${appliedStateEpoch}:${appliedStateVersion}" +
+                                            "->$epoch:$version; resync"
+                                    snapshotAssembler.reset()
+                                    receiverEpoch++
+                                    return@withContext
+                                }
 
+                                appliedStateEpoch = epoch
+                                appliedStateVersion = version
+                            }
+
+                            val ping = message.ping
                             val isLiveLocalPing =
                                 ping.senderId == localSenderId &&
                                     pings.any { it.id == ping.id }
 
                             if (isLiveLocalPing) {
-                                udpStatus = "RX: own ping ${ping.id} confirmed"
+                                udpStatus = "RX: own ping ${ping.id} confirmed v${version ?: "-"}"
                                 return@withContext
                             }
 
                             val existing = remotePings[ping.id]
-
                             if (existing == ping) {
+                                if (version != null) appliedStateVersion = version
                                 udpStatus = "RX: duplicate ${ping.id} ignored"
                                 return@withContext
                             }
@@ -183,82 +215,122 @@ fun ArScreen() {
 
                             val cal = currentCalibrationState.value
                             val session = currentSessionState.value
-
                             if (cal == null || session == null) {
-                                udpStatus = "RX: ping ${ping.id} pending calibration"
+                                udpStatus = "RX: ping ${ping.id} pending calibration v${version ?: "-"}"
                                 return@withContext
                             }
 
                             val projection = RemotePingProjector.project(ping, cal)
-
                             if (projection == null) {
                                 udpStatus = "RX: frame mismatch b${ping.beaconId}"
                                 return@withContext
                             }
 
                             remoteAnchors.remove(ping.id)?.detach()
-
                             val local = projection.localPosition
-                            val anchor = session.createAnchor(
+                            remoteAnchors[ping.id] = session.createAnchor(
                                 Pose.makeTranslation(local.x, local.y, local.z)
                             )
-
-                            remoteAnchors[ping.id] = anchor
-                            udpStatus = "RX: rendered ping ${ping.id}"
+                            udpStatus = "RX: rendered ping ${ping.id} v${version ?: "-"}"
                         }
 
                         is InboundMessage.PingRemove -> {
+                            val epoch = message.stateEpoch
+                            val version = message.stateVersion
+                            if (epoch != null && version != null) {
+                                if (
+                                    epoch < appliedStateEpoch ||
+                                    (epoch == appliedStateEpoch &&
+                                        version <= appliedStateVersion)
+                                ) {
+                                    udpStatus = "RX: stale remove $epoch:$version ignored"
+                                    return@withContext
+                                }
+                                if (
+                                    epoch > appliedStateEpoch ||
+                                    version > appliedStateVersion + 1
+                                ) {
+                                    udpStatus =
+                                        "RX: version gap ${appliedStateEpoch}:${appliedStateVersion}" +
+                                            "->$epoch:$version; resync"
+                                    snapshotAssembler.reset()
+                                    receiverEpoch++
+                                    return@withContext
+                                }
+
+                                appliedStateEpoch = epoch
+                                appliedStateVersion = version
+                            }
+
                             val isLiveLocalPing =
                                 message.senderId == localSenderId &&
                                     pings.any { it.id == message.pingId }
 
                             if (isLiveLocalPing) {
-                                udpStatus = "RX: own remove ${message.pingId} confirmed"
+                                udpStatus = "RX: own remove ${message.pingId} confirmed v${version ?: "-"}"
                                 return@withContext
                             }
 
                             remotePings.remove(message.pingId)
                             remoteAnchors[message.pingId]?.detach()
-                            udpStatus = "RX: removed ping ${message.pingId}"
+                            udpStatus = "RX: removed ping ${message.pingId} v${version ?: "-"}"
                         }
 
-                        is InboundMessage.Snapshot -> {
+                        is InboundMessage.SnapshotChunk -> {
+                            val result = snapshotAssembler.add(
+                                chunk = message,
+                                minimumStateEpoch = appliedStateEpoch,
+                                minimumStateVersion = appliedStateVersion
+                            )
+
+                            when (result.status) {
+                                SnapshotAssemblyStatus.STALE -> {
+                                    udpStatus = "RX: stale snapshot v${message.stateVersion} ignored"
+                                    return@withContext
+                                }
+                                SnapshotAssemblyStatus.CONFLICT -> {
+                                    udpStatus = "RX: snapshot conflict; resync"
+                                    snapshotAssembler.reset()
+                                    receiverEpoch++
+                                    return@withContext
+                                }
+                                SnapshotAssemblyStatus.INCOMPLETE -> {
+                                    udpStatus = "RX: snapshot ${message.chunkIndex + 1}/${message.chunkCount} v${message.stateVersion}"
+                                    return@withContext
+                                }
+                                SnapshotAssemblyStatus.COMPLETE -> Unit
+                            }
+
                             remoteAnchors.values.forEach { it.detach() }
                             remotePings.clear()
 
                             val cal = currentCalibrationState.value
                             val session = currentSessionState.value
-
-                            message.pings.forEach { ping ->
+                            result.pings.orEmpty().forEach { ping ->
                                 val isLiveLocalPing =
                                     ping.senderId == localSenderId &&
                                         pings.any { it.id == ping.id }
-
-                                if (isLiveLocalPing) {
-                                    return@forEach
-                                }
+                                if (isLiveLocalPing) return@forEach
 
                                 remotePings[ping.id] = ping
-
                                 if (cal != null && session != null) {
-                                    val projection =
-                                        RemotePingProjector.project(ping, cal)
-
+                                    val projection = RemotePingProjector.project(ping, cal)
                                     if (projection != null) {
                                         val local = projection.localPosition
                                         remoteAnchors[ping.id] = session.createAnchor(
-                                            Pose.makeTranslation(
-                                                local.x,
-                                                local.y,
-                                                local.z
-                                            )
+                                            Pose.makeTranslation(local.x, local.y, local.z)
                                         )
                                     }
                                 }
                             }
 
+                            appliedStateEpoch =
+                                result.stateEpoch ?: appliedStateEpoch
+                            appliedStateVersion =
+                                result.stateVersion ?: appliedStateVersion
                             udpStatus =
-                                "RX: snapshot ${remotePings.size} ping(s)"
+                                "RX: snapshot ${remotePings.size} ping(s) " +
+                                    "e$appliedStateEpoch v$appliedStateVersion"
                         }
                     }
                 }

@@ -39,12 +39,17 @@ class InboundMessageInstrumentedTest {
     }
 
     @Test
-    fun parsesSnapshot() {
+    fun parsesSnapshotChunk() {
         val message = parseInboundMessage(
-            """{"type":"SNAPSHOT","pings":[{"id":1,"senderId":7,"beaconId":0,"x":1.0,"y":2.0,"z":3.0,"createdAt":1000},{"id":2,"senderId":8,"beaconId":0,"x":4.0,"y":5.0,"z":6.0,"createdAt":2000}]}"""
+            """{"type":"SNAPSHOT","snapshotId":55,"stateEpoch":100,"stateVersion":7,"chunkIndex":1,"chunkCount":3,"pings":[{"id":1,"senderId":7,"beaconId":0,"x":1.0,"y":2.0,"z":3.0,"createdAt":1000},{"id":2,"senderId":8,"beaconId":0,"x":4.0,"y":5.0,"z":6.0,"createdAt":2000}]}"""
         )
 
-        require(message is InboundMessage.Snapshot)
+        require(message is InboundMessage.SnapshotChunk)
+        assertEquals(55L, message.snapshotId)
+        assertEquals(100L, message.stateEpoch)
+        assertEquals(7L, message.stateVersion)
+        assertEquals(1, message.chunkIndex)
+        assertEquals(3, message.chunkCount)
         assertEquals(2, message.pings.size)
         assertEquals(1L, message.pings[0].id)
         assertEquals(2L, message.pings[1].id)

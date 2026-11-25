@@ -191,10 +191,58 @@ The regression proves:
 
 This establishes the intended recovery rule: clients may disappear, but authoritative overlay state remains at the relay and is reconstructed from snapshot when they return.
 
+## Snapshot chunking and authoritative ordering
+
+Prototype 0.4 no longer sends the entire snapshot as one UDP datagram.
+
+Every accepted relay mutation is assigned authoritative ordering metadata by the relay:
+- `stateEpoch`: identifies the current relay process/timeline.
+- `stateVersion`: increments once for every accepted PING_CREATE or PING_REMOVE within that epoch.
+
+Clients never choose these values. The relay re-serializes accepted mutations with its own epoch/version before broadcasting them.
+
+Snapshot packets now contain:
+- `snapshotId`.
+- `stateEpoch`.
+- `stateVersion`.
+- `chunkIndex`.
+- `chunkCount`.
+- the chunk's ping list.
+
+The current ping snapshot is split into groups of at most 16 pings. The relay also checks the serialized chunk against the 4096-byte prototype payload ceiling before sending.
+
+Client snapshot assembly rules:
+- chunks may arrive out of order.
+- identical duplicate chunks are harmless.
+- local authoritative state is replaced only after every chunk is present.
+- an older epoch is rejected.
+- an older version in the current epoch is rejected.
+- a newer snapshot supersedes an incomplete older snapshot.
+
+Diff ordering rules:
+- a contiguous mutation in the current epoch is applied and advances the local version.
+- a stale/duplicate mutation is ignored.
+- a version gap is not guessed through; the client re-registers to request a fresh snapshot.
+- a mutation from a newer relay epoch triggers snapshot resynchronization rather than direct application.
+
+Relay restart handling:
+- each relay process receives a newer startup epoch.
+- after restart, the client's next heartbeat is unknown to the new registry.
+- an unknown heartbeat is treated as registration and receives a fresh snapshot.
+- the newer epoch snapshot may reset `stateVersion` to 0 and still replace state from the older epoch.
+- transient UDP port-unreachable errors while the relay is down are tolerated rather than crashing the client.
+
+Automated verification:
+- `Test-Prototype04-Chunking.ps1`: 35 pings -> three chunks -> complete 35-ping reconstruction -> version 36 diff.
+- `Test-Prototype04-Versioning.ps1`: deliberate version gap triggers snapshot resync; stale diff is ignored.
+- `Test-Prototype04-RelayRestart.ps1`: relay epoch A dies, epoch B starts, heartbeat re-registration sends a new empty snapshot and clears old client state.
+- C# and Android assembler unit tests cover out-of-order chunks, duplicates, stale epochs/versions, and newer-epoch version reset.
+
 ## Known limitations
 
 - relay host must still be configured per development machine; automatic discovery is future work.
 - random persisted identity is not authenticated and is not suitable as a security identity.
-- snapshot currently contains the complete ping set in one UDP datagram; chunking is future work if state grows.
+- snapshot chunks are currently bounded by a fixed 16-ping count; future overlay types should use adaptive byte-budget chunking.
+- there is not yet a snapshot-chunk timeout/retransmission mechanism. If a chunk is lost and no later mutation exposes a version gap, an incomplete snapshot can remain pending until another resync occurs.
 - retained detached SceneView marker objects are a temporary workaround for the Filament texture teardown crash and should eventually get a safe deferred-destruction lifecycle.
 - no encrypted transport/authentication yet.
