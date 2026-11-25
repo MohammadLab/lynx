@@ -86,16 +86,26 @@ Real relay-to-tablet network smoke test on SM-X800:
 
 This proves the real network receive, parse, store, and remove path.
 
-## Remaining physical validation
+## Physical validation
 
-With the tablet calibrated to beacon 0:
+The calibrated network render/remove path was validated on the physical SM-X800 tablet.
 
-1. Start the relay forwarding to the tablet.
-2. Send a PING_CREATE from LynxPingSender using a different sender ID, for example 99.
-3. Confirm Android reports the ping as rendered.
-4. Confirm a Lynx marker appears at the expected shared-space location.
-5. Send PING_REMOVE for the same ID.
-6. Confirm the AR marker disappears.
+Observed result:
+- tablet calibrated successfully to beacon 0 with 4/4 plane hits.
+- remote PING_CREATE id=5002, sender=99, beacon=0, shared (0.50, 0.00, 1.00) was accepted by the relay.
+- Android reported `RX: rendered ping 5002` and `REMOTE 1 ping(s) 1 rendered`.
+- the remote Lynx AR marker rendered in the calibrated scene.
+- remote PING_REMOVE id=5002 was accepted and forwarded.
+- Android reported `RX: removed ping 5002` and `REMOTE 0 ping(s) 0 rendered`.
+- the Android process remained alive after remove.
+
+An earlier remove attempt exposed a native SceneView/Filament lifecycle crash:
+
+    Invalid texture still bound to MaterialInstance: Transparent Textured
+
+The crash happened because removing the Compose-rendered billboard could destroy its texture while Filament was still using it in the current frame.
+
+The Prototype 0.4 fix removes authoritative remote ping state and detaches the ARCore anchor, but retains the SceneView render object instead of destroying it immediately. This avoids the unsafe mid-frame texture teardown while correctly making the remote ping inactive.
 
 ## Known limitations
 

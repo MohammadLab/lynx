@@ -202,7 +202,7 @@ fun ArScreen() {
                             }
 
                             remotePings.remove(message.pingId)
-                            remoteAnchors.remove(message.pingId)?.detach()
+                            remoteAnchors[message.pingId]?.detach()
                             udpStatus = "RX: removed ping ${message.pingId}"
                         }
                     }
@@ -299,7 +299,8 @@ fun ArScreen() {
                     fontSize = 13.sp
                 )
                 Text(
-                    text = "REMOTE  ${remotePings.size} ping(s)  ${remoteAnchors.size} rendered",
+                    text = "REMOTE  ${remotePings.size} ping(s)  " +
+                        "${remotePings.keys.count { remoteAnchors.containsKey(it) }} rendered",
                     color = Color.White,
                     fontSize = 13.sp
                 )
