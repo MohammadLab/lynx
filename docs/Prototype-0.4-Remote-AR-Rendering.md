@@ -156,10 +156,45 @@ Passive physical validation succeeded with no camera interaction:
 
 Relay host/port are now Gradle BuildConfig values sourced from Android `local.properties` (`lynx.relayHost` and `lynx.relayPort`) rather than hardcoded inside ArScreen.kt.
 
+## Stable client identity
+
+Android no longer uses the hardcoded client/sender ID 1.
+
+`ClientIdentityStore` generates a random positive 63-bit ID using `SecureRandom` on first launch and persists it in app-private SharedPreferences.
+
+For Prototype 0.4, that stable value is used as both:
+- `clientId` for relay registration/heartbeat.
+- `senderId` for ping ownership.
+
+The ID survives app process restarts. Physical validation on the SM-X800 confirmed the same ID before and after a force-stop/relaunch:
+
+    4219839555241340694
+
+The HUD displays the final eight digits for quick debugging.
+
+This is a prototype identity mechanism only. In the cyber/authentication phase, identity should come from authenticated credentials rather than locally-generated random state.
+
+## Disconnect and reconnect recovery
+
+Automated `scripts/Test-Prototype04-Reconnect.ps1` validates registry expiry and authoritative state recovery.
+
+The regression proves:
+- client 201 registers and receives an empty snapshot.
+- ping 7001 is created while the client is online.
+- the client process is terminated.
+- after the heartbeat timeout, the relay expires the client from the registry.
+- ping 7002 is created while the client is offline and remains in authoritative relay state.
+- the same client ID restarts and re-registers.
+- the relay snapshot contains both pings.
+- the restarted viewer applies both authoritative pings without requiring replay of the original create events.
+- subsequent removes for both restored pings are applied and the viewer ends empty.
+
+This establishes the intended recovery rule: clients may disappear, but authoritative overlay state remains at the relay and is reconstructed from snapshot when they return.
+
 ## Known limitations
 
-- Android local sender/client ID is still hardcoded to 1.
 - relay host must still be configured per development machine; automatic discovery is future work.
+- random persisted identity is not authenticated and is not suitable as a security identity.
 - snapshot currently contains the complete ping set in one UDP datagram; chunking is future work if state grows.
 - retained detached SceneView marker objects are a temporary workaround for the Filament texture teardown crash and should eventually get a safe deferred-destruction lifecycle.
 - no encrypted transport/authentication yet.

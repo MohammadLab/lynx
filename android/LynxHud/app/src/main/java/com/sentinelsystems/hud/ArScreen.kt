@@ -42,6 +42,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Arrangement
 import com.sentinelsystems.hud.model.Ping
+import com.sentinelsystems.hud.identity.ClientIdentityStore
 import com.sentinelsystems.hud.calibration.BeaconDetector
 import com.sentinelsystems.hud.calibration.Calibration
 import com.sentinelsystems.hud.calibration.CalibrationAttempt
@@ -137,7 +138,9 @@ fun ArScreen() {
         mutableStateOf<CalibrationAttempt?>(null)
     }
 
-    val localSenderId = 1L
+    val localSenderId = remember {
+        ClientIdentityStore(context).getOrCreate()
+    }
     val pcHost = BuildConfig.LYNX_RELAY_HOST
     val pcPort = BuildConfig.LYNX_RELAY_PORT
     val receivePort = 7778
@@ -347,6 +350,11 @@ fun ArScreen() {
 
                 Text(
                     text = udpStatus,
+                    color = Color.White,
+                    fontSize = 13.sp
+                )
+                Text(
+                    text = "ID      ${localSenderId.toString().takeLast(8)}",
                     color = Color.White,
                     fontSize = 13.sp
                 )
