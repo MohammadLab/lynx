@@ -7,13 +7,18 @@ public static class LynxMessageTypes
 {
     public const string PingCreate = "PING_CREATE";
     public const string PingRemove = "PING_REMOVE";
+    public const string ClientRegister = "CLIENT_REGISTER";
+    public const string ClientHeartbeat = "CLIENT_HEARTBEAT";
+    public const string Snapshot = "SNAPSHOT";
 }
 
 public sealed record LynxMessage(
     [property: JsonPropertyName("type")] string Type,
     [property: JsonPropertyName("ping")] PingMessage? Ping = null,
     [property: JsonPropertyName("pingId")] long? PingId = null,
-    [property: JsonPropertyName("senderId")] long? SenderId = null
+    [property: JsonPropertyName("senderId")] long? SenderId = null,
+    [property: JsonPropertyName("clientId")] long? ClientId = null,
+    [property: JsonPropertyName("pings")] IReadOnlyList<PingMessage>? Pings = null
 );
 
 public static class LynxMessageCodec
@@ -80,6 +85,34 @@ public static class LynxMessageCodec
 
                 return true;
 
+            case LynxMessageTypes.ClientRegister:
+            case LynxMessageTypes.ClientHeartbeat:
+                if (message.ClientId is null or <= 0)
+                {
+                    error = $"{message.Type} requires clientId greater than zero.";
+                    return false;
+                }
+
+                return true;
+
+            case LynxMessageTypes.Snapshot:
+                if (message.Pings is null)
+                {
+                    error = "SNAPSHOT requires pings.";
+                    return false;
+                }
+
+                foreach (var ping in message.Pings)
+                {
+                    if (!PingCodec.Validate(ping, out error))
+                    {
+                        error = $"Invalid snapshot ping: {error}";
+                        return false;
+                    }
+                }
+
+                return true;
+
             default:
                 error = $"Unknown message type '{message.Type}'.";
                 return false;
@@ -94,4 +127,13 @@ public static class LynxMessageCodec
 
     public static LynxMessage RemovePing(long pingId, long senderId) =>
         new(LynxMessageTypes.PingRemove, PingId: pingId, SenderId: senderId);
+
+    public static LynxMessage RegisterClient(long clientId) =>
+        new(LynxMessageTypes.ClientRegister, ClientId: clientId);
+
+    public static LynxMessage Heartbeat(long clientId) =>
+        new(LynxMessageTypes.ClientHeartbeat, ClientId: clientId);
+
+    public static LynxMessage Snapshot(IReadOnlyList<PingMessage> pings) =>
+        new(LynxMessageTypes.Snapshot, Pings: pings);
 }

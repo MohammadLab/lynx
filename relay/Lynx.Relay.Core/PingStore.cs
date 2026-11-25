@@ -22,6 +22,9 @@ public sealed class PingStore
 
     public int Count => _pings.Count;
 
+    public IReadOnlyList<PingMessage> Snapshot() =>
+        _pings.Values.OrderBy(ping => ping.Id).ToArray();
+
     public PingAddResult TryAdd(PingMessage ping)
     {
         if (!_pings.TryGetValue(ping.Id, out var existing))

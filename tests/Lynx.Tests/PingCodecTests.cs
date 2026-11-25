@@ -134,4 +134,43 @@ public sealed class PingCodecTests
         Assert.False(ok);
         Assert.Contains("senderId greater than zero", error);
     }
+
+    [Fact]
+    public void MessageCodec_AcceptsClientRegister()
+    {
+        var bytes = LynxMessageCodec.Serialize(LynxMessageCodec.RegisterClient(101));
+        var ok = LynxMessageCodec.TryParse(bytes, out var parsed, out var error);
+
+        Assert.True(ok, error);
+        Assert.Equal(LynxMessageTypes.ClientRegister, parsed!.Type);
+        Assert.Equal(101L, parsed.ClientId);
+    }
+
+    [Fact]
+    public void MessageCodec_AcceptsHeartbeat()
+    {
+        var bytes = LynxMessageCodec.Serialize(LynxMessageCodec.Heartbeat(101));
+        var ok = LynxMessageCodec.TryParse(bytes, out var parsed, out var error);
+
+        Assert.True(ok, error);
+        Assert.Equal(LynxMessageTypes.ClientHeartbeat, parsed!.Type);
+        Assert.Equal(101L, parsed.ClientId);
+    }
+
+    [Fact]
+    public void MessageCodec_SnapshotRoundTripsPings()
+    {
+        var pings = new[]
+        {
+            new PingMessage(1, 7, 0, 1f, 2f, 3f, 1000),
+            new PingMessage(2, 8, 0, 4f, 5f, 6f, 2000)
+        };
+
+        var bytes = LynxMessageCodec.Serialize(LynxMessageCodec.Snapshot(pings));
+        var ok = LynxMessageCodec.TryParse(bytes, out var parsed, out var error);
+
+        Assert.True(ok, error);
+        Assert.Equal(LynxMessageTypes.Snapshot, parsed!.Type);
+        Assert.Equal(pings, parsed.Pings);
+    }
 }

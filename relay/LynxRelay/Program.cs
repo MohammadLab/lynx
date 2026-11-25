@@ -4,9 +4,9 @@ using Lynx.Protocol;
 using Lynx.Relay.Core;
 
 const int MaxPayloadBytes = 4096;
-
 var listenPort = 7777;
-var forwardTo = new IPEndPoint(IPAddress.Loopback, 7778);
+IPEndPoint? legacyForwardTo = null;
+var clientTimeout = TimeSpan.FromSeconds(15);
 
 for (var i = 0; i < args.Length; i++)
 {
@@ -17,17 +17,24 @@ for (var i = 0; i < args.Length; i++)
             break;
 
         case "--forward" when i + 1 < args.Length:
-            forwardTo = ParseEndpoint(args[++i]);
+            legacyForwardTo = ParseEndpoint(args[++i]);
+            break;
+
+        case "--client-timeout-seconds" when i + 1 < args.Length:
+            clientTimeout = TimeSpan.FromSeconds(int.Parse(args[++i]));
             break;
     }
 }
 
 var pings = new PingStore();
+var clients = new ClientRegistry();
 
 using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, listenPort));
 
 Console.WriteLine($"[Relay] Listening on UDP :{listenPort}");
-Console.WriteLine($"[Relay] Forwarding accepted messages to {forwardTo}");
+Console.WriteLine($"[Relay] Client timeout: {clientTimeout.TotalSeconds:F0}s");
+if (legacyForwardTo is not null)
+    Console.WriteLine($"[Relay] Legacy forward: {legacyForwardTo}");
 Console.WriteLine($"[Relay] Max payload: {MaxPayloadBytes} bytes");
 Console.WriteLine("[Relay] Ctrl+C to stop.");
 Console.WriteLine();
@@ -37,6 +44,11 @@ while (true)
     var received = await udp.ReceiveAsync();
     var payload = received.Buffer;
     var from = received.RemoteEndPoint;
+    var now = DateTimeOffset.UtcNow;
+
+    var expired = clients.RemoveExpired(now, clientTimeout);
+    if (expired > 0)
+        Console.WriteLine($"[Relay] Expired {expired} client(s); active={clients.Count}");
 
     if (payload.Length > MaxPayloadBytes)
     {
@@ -55,6 +67,30 @@ while (true)
 
     switch (message.Type)
     {
+        case LynxMessageTypes.ClientRegister:
+        {
+            var clientId = message.ClientId!.Value;
+            clients.RegisterOrRefresh(clientId, from, now);
+
+            var snapshot = LynxMessageCodec.Serialize(
+                LynxMessageCodec.Snapshot(pings.Snapshot()));
+            await udp.SendAsync(snapshot, from);
+
+            Console.WriteLine(
+                $"[Relay] REGISTER client={clientId} endpoint={from} " +
+                $"active={clients.Count} snapshot={pings.Count}");
+            break;
+        }
+
+        case LynxMessageTypes.ClientHeartbeat:
+        {
+            var clientId = message.ClientId!.Value;
+            clients.RegisterOrRefresh(clientId, from, now);
+            Console.WriteLine(
+                $"[Relay] HEARTBEAT client={clientId} endpoint={from} active={clients.Count}");
+            break;
+        }
+
         case LynxMessageTypes.PingCreate:
         {
             var ping = message.Ping!;
@@ -62,8 +98,7 @@ while (true)
             switch (pings.TryAdd(ping))
             {
                 case PingAddResult.Duplicate:
-                    Console.WriteLine(
-                        $"[Relay] DUP create ignored id={ping.Id} from {from}");
+                    Console.WriteLine($"[Relay] DUP create ignored id={ping.Id} from {from}");
                     continue;
 
                 case PingAddResult.Conflict:
@@ -82,10 +117,7 @@ while (true)
                 $"shared=({ping.X:F2}, {ping.Y:F2}, {ping.Z:F2}) from {from} " +
                 $"stored={pings.Count}");
 
-            await udp.SendAsync(payload, forwardTo);
-
-            Console.WriteLine(
-                $"[Relay] -> forwarded PING_CREATE id={ping.Id} to {forwardTo}");
+            await BroadcastAccepted(payload, $"PING_CREATE id={ping.Id}");
             break;
         }
 
@@ -97,8 +129,7 @@ while (true)
             switch (pings.TryRemove(pingId, senderId))
             {
                 case PingRemoveResult.NotFound:
-                    Console.WriteLine(
-                        $"[Relay] DUP remove ignored id={pingId} from {from}");
+                    Console.WriteLine($"[Relay] DUP remove ignored id={pingId} from {from}");
                     continue;
 
                 case PingRemoveResult.SenderMismatch:
@@ -115,13 +146,35 @@ while (true)
                 $"[Relay] REMOVE id={pingId} sender={senderId} from {from} " +
                 $"stored={pings.Count}");
 
-            await udp.SendAsync(payload, forwardTo);
-
-            Console.WriteLine(
-                $"[Relay] -> forwarded PING_REMOVE id={pingId} to {forwardTo}");
+            await BroadcastAccepted(payload, $"PING_REMOVE id={pingId}");
             break;
         }
+
+        case LynxMessageTypes.Snapshot:
+            Console.WriteLine($"[Relay] DROP from {from}: clients may not send SNAPSHOT");
+            break;
     }
+}
+
+async Task BroadcastAccepted(byte[] payload, string description)
+{
+    var endpoints = clients.Clients
+        .Select(client => client.Endpoint)
+        .ToList();
+
+    if (legacyForwardTo is not null &&
+        endpoints.All(endpoint => !endpoint.Equals(legacyForwardTo)))
+    {
+        endpoints.Add(legacyForwardTo);
+    }
+
+    foreach (var endpoint in endpoints)
+    {
+        await udp.SendAsync(payload, endpoint);
+    }
+
+    Console.WriteLine(
+        $"[Relay] -> broadcast {description} to {endpoints.Count} endpoint(s)");
 }
 
 static IPEndPoint ParseEndpoint(string value)

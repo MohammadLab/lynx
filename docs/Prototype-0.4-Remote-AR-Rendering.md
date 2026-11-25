@@ -107,10 +107,37 @@ The crash happened because removing the Compose-rendered billboard could destroy
 
 The Prototype 0.4 fix removes authoritative remote ping state and detaches the ARCore anchor, but retains the SceneView render object instead of destroying it immediately. This avoids the unsafe mid-frame texture teardown while correctly making the remote ping inactive.
 
+## Multi-client relay
+
+The relay now supports registered UDP clients instead of relying only on one hardcoded forward endpoint.
+
+Protocol additions:
+- `CLIENT_REGISTER { clientId }`
+- `CLIENT_HEARTBEAT { clientId }`
+- `SNAPSHOT { pings[] }`
+
+Registration uses the source endpoint of the UDP datagram. Clients do not tell the relay what IP/port to send to; the relay learns the return endpoint from the socket that actually contacted it.
+
+The relay:
+- tracks client ID, UDP endpoint, and last-seen time.
+- refreshes the registration on heartbeat.
+- expires stale clients after the configured timeout.
+- broadcasts accepted PING_CREATE and PING_REMOVE messages to all active clients.
+- sends the authoritative ping snapshot immediately when a client registers.
+- retains the old `--forward` option temporarily for backward-compatible regression testing.
+
+ViewerSim now registers from the same UDP socket it listens on, sends periodic heartbeats, applies snapshots, and continues to enforce beacon-frame isolation.
+
+Automated `scripts/Test-Prototype04.ps1` verifies:
+- two independently registered clients receive the same create.
+- a third late-joining client recovers the existing ping from snapshot.
+- remove is broadcast to all three clients.
+- all viewers end with zero stored pings.
+
 ## Known limitations
 
-- relay currently forwards to only one endpoint.
+- Android has not yet been migrated to CLIENT_REGISTER / heartbeat / SNAPSHOT; current physical testing still uses relay `--forward`.
 - Android local sender ID is hardcoded to 1.
-- relay host and tablet IP handling are still prototype configuration.
-- no snapshot/reconnect state recovery yet.
+- relay host configuration is still prototype configuration.
+- snapshot currently contains the complete ping set in one UDP datagram; chunking is future work if state grows.
 - no encrypted transport/authentication yet.
