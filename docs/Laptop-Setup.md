@@ -183,3 +183,31 @@ Full verification:
 ```
 
 Remaining Prototype 0.5 validation is physical only: use the WinUI floorplan and calibrated Android device against the same AprilTag frame and visually confirm the desktop-selected marker appears/disappears at the expected real-world location.
+
+Prototype 0.6 software scope: complete.
+
+Implemented:
+- generalized MARKER / PATH / ZONE overlay model.
+- client command ingress (`OVERLAY_CREATE`, `OVERLAY_UPDATE`, `OVERLAY_REMOVE`).
+- relay-only authoritative `OVERLAY_DIFF` egress.
+- per-overlay revisions plus global relay epoch/version ordering.
+- generalized reconnect snapshots and 1200-byte adaptive chunking.
+- optimistic revision checks, ownership enforcement, endpoint registration checks, and geometry validation.
+- 16-point maximum geometry bound for atomic UDP snapshot recovery.
+- desktop generalized overlay state/client API.
+- Android generalized overlay state, single-socket registered client, and shared-space geometry projection.
+- legacy ping compatibility adapter backed by the generalized relay authority.
+
+Full verification:
+
+```powershell
+.\scripts\Test-Prototype06-All.ps1
+```
+
+With an Android device connected:
+
+```powershell
+.\scripts\Test-Prototype06-All.ps1 -ConnectedAndroid
+```
+
+Prototype 0.7 can now build operator PATH/ZONE drawing and Android PATH/ZONE rendering on top of the generalized state layer.

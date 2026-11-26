@@ -265,20 +265,25 @@ public sealed partial class MainWindow : Window
     }
 
     private void RelayClient_StateChanged(
-        IReadOnlyList<PingMessage> pings,
+        IReadOnlyList<OverlayMessage> overlays,
         long epoch,
         long version)
     {
         DispatcherQueue.TryEnqueue(() =>
         {
             VersionText.Text = $"Epoch {epoch} / Version {version}";
-            ApplyAuthoritativeState(pings);
+            ApplyAuthoritativeState(overlays);
         });
     }
 
-    private void ApplyAuthoritativeState(IReadOnlyList<PingMessage> pings)
+    private void ApplyAuthoritativeState(IReadOnlyList<OverlayMessage> overlays)
     {
-        var authoritativeIds = pings.Select(ping => ping.Id).ToHashSet();
+        var markers = overlays
+            .Where(overlay => overlay.Kind == OverlayKinds.Marker)
+            .OrderBy(overlay => overlay.OverlayId)
+            .ToArray();
+
+        var authoritativeIds = markers.Select(overlay => overlay.OverlayId).ToHashSet();
         foreach (var pendingId in _pendingMarkerVisuals.Keys.ToArray())
         {
             if (!authoritativeIds.Contains(pendingId)) continue;
@@ -286,23 +291,23 @@ public sealed partial class MainWindow : Window
         }
 
         _markerRows.Clear();
-        foreach (var ping in pings.OrderBy(ping => ping.Id))
-            _markerRows.Add(new MarkerRow(ping, _clientId));
+        foreach (var overlay in markers)
+            _markerRows.Add(new MarkerRow(overlay, _clientId));
 
         ClearAuthoritativeVisuals();
         if (_calibration is null) return;
 
-        foreach (var ping in pings)
+        foreach (var overlay in markers)
         {
-            if (ping.BeaconId != 0) continue;
-
+            if (overlay.BeaconId != 0 || overlay.Geometry.Count != 1) continue;
+            var point = overlay.Geometry[0];
             var pixel = _calibration.SharedToPixel(
-                new SharedPoint(ping.X, ping.Y, ping.Z));
+                new SharedPoint(point.X, point.Y, point.Z));
             var visual = AddPointVisual(
                 pixel,
-                ping.SenderId == _clientId ? Colors.DeepSkyBlue : Colors.Red,
+                overlay.OwnerId == _clientId ? Colors.DeepSkyBlue : Colors.Red,
                 16);
-            _authoritativeMarkerVisuals[ping.Id] = visual;
+            _authoritativeMarkerVisuals[overlay.OverlayId] = visual;
         }
     }
 
@@ -501,20 +506,21 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            var ping = await client.CreateMarkerAsync(shared, beaconId: 0);
+            var command = await client.CreateMarkerAsync(shared, beaconId: 0);
 
-            if (client.StateSnapshot().Any(existing => existing.Id == ping.Id))
+            if (client.StateSnapshot().Any(existing => existing.OverlayId == command.OverlayId))
             {
                 FloorplanSurface.Children.Remove(preview);
             }
             else
             {
-                _pendingMarkerVisuals[ping.Id] = preview;
-                _ = ExpirePendingPreviewAsync(ping.Id);
+                _pendingMarkerVisuals[command.OverlayId] = preview;
+                _ = ExpirePendingPreviewAsync(command.OverlayId);
             }
 
+            var point = command.Geometry[0];
             LastCommandText.Text =
-                $"CREATE id={ping.Id} shared=({ping.X:0.000}, {ping.Y:0.000}, {ping.Z:0.000})";
+                $"CREATE id={command.OverlayId} shared=({point.X:0.000}, {point.Y:0.000}, {point.Z:0.000})";
             SetStatus("Marker command sent; waiting for authoritative relay echo.");
         }
         catch (Exception ex)
@@ -552,14 +558,14 @@ public sealed partial class MainWindow : Window
 
         if (!row.OwnedByOperator)
         {
-            SetStatus("Prototype 0.5 only allows this operator client to remove its own markers.");
+            SetStatus("This operator client can remove only overlays it owns.");
             return;
         }
 
         try
         {
-            await client.RemoveMarkerAsync(row.Ping.Id);
-            LastCommandText.Text = $"REMOVE id={row.Ping.Id}";
+            await client.RemoveMarkerAsync(row.Overlay.OverlayId);
+            LastCommandText.Text = $"REMOVE id={row.Overlay.OverlayId}";
             SetStatus("Remove command sent; waiting for authoritative relay update.");
         }
         catch (Exception ex)
@@ -685,17 +691,20 @@ public sealed partial class MainWindow : Window
 
     private sealed class MarkerRow
     {
-        public MarkerRow(PingMessage ping, long operatorClientId)
+        public MarkerRow(OverlayMessage overlay, long operatorClientId)
         {
-            Ping = ping;
-            OwnedByOperator = ping.SenderId == operatorClientId;
+            Overlay = overlay;
+            OwnedByOperator = overlay.OwnerId == operatorClientId;
         }
 
-        public PingMessage Ping { get; }
+        public OverlayMessage Overlay { get; }
         public bool OwnedByOperator { get; }
 
-        public override string ToString() =>
-            $"{(OwnedByOperator ? "OWN" : "REMOTE")}  {Ping.Id}  " +
-            $"({Ping.X:0.00}, {Ping.Y:0.00}, {Ping.Z:0.00})  b{Ping.BeaconId}";
+        public override string ToString()
+        {
+            var point = Overlay.Geometry[0];
+            return $"{(OwnedByOperator ? "OWN" : "REMOTE")}  {Overlay.OverlayId}  " +
+                $"r{Overlay.Revision}  ({point.X:0.00}, {point.Y:0.00}, {point.Z:0.00})  b{Overlay.BeaconId}";
+        }
     }
 }

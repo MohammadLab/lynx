@@ -129,7 +129,7 @@
                         <TextBlock Text="No floorplan loaded"
                                    FontSize="24"
                                    HorizontalAlignment="Center"/>
-                        <TextBlock Text="Load a PNG or JPEG to begin Prototype 0.5."
+                        <TextBlock Text="Load a PNG or JPEG to begin Prototype 0.6."
                                    Foreground="#94A3B8"/>
                     </StackPanel>
 
@@ -264,7 +264,7 @@
                 BorderThickness="0,1,0,0"
                 Padding="12,8">
             <TextBlock x:Name="StatusText"
-                       Text="Prototype 0.5 ready."
+                       Text="Prototype 0.6 ready."
                        TextWrapping="Wrap"/>
         </Border>
     </Grid>

@@ -37,8 +37,8 @@ try {
     $relayText = Get-Content $relayLog -Raw
     if ($relayText -notmatch "DISCOVERY reply") { throw "Desktop auto-discovery was not exercised." }
     if ($relayText -notmatch "REGISTER client=501") { throw "Desktop client did not register." }
-    if ($relayText -notmatch "CREATE .*sender=501") { throw "Desktop create was not authoritative." }
-    if ($relayText -notmatch "REMOVE .*sender=501") { throw "Desktop remove was not authoritative." }
+    if ($relayText -notmatch "OVERLAY CREATE .*owner=501") { throw "Desktop create was not authoritative." }
+    if ($relayText -notmatch "OVERLAY REMOVE") { throw "Desktop remove was not authoritative." }
 
     Write-Host ""
     Write-Host "[PASS] Prototype 0.5 desktop client lifecycle passed."

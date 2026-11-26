@@ -54,12 +54,12 @@ client.StateChanged += (pings, epoch, version) =>
     if (pings.Count > 0)
         sawNonEmptyState = true;
 
-    if (expectedPingId > 0 && pings.Any(ping => ping.Id == expectedPingId))
+    if (expectedPingId > 0 && pings.Any(overlay => overlay.OverlayId == expectedPingId))
         created.TrySetResult(expectedPingId);
 
     if (expectedPingId > 0 &&
         sawNonEmptyState &&
-        pings.All(ping => ping.Id != expectedPingId))
+        pings.All(overlay => overlay.OverlayId != expectedPingId))
         removed.TrySetResult(true);
 
     if (scenario == "restart-watch" && sawNonEmptyState && pings.Count == 0)
@@ -90,11 +90,11 @@ try
         new SharedPoint(1.25, 0, 2.5),
         beaconId: 0,
         cts.Token);
-    expectedPingId = ping.Id;
-    Console.WriteLine($"[OperatorSim] CREATE SENT id={ping.Id}");
+    expectedPingId = ping.OverlayId;
+    Console.WriteLine($"[OperatorSim] CREATE SENT id={ping.OverlayId}");
 
     await created.Task.WaitAsync(TimeSpan.FromSeconds(8));
-    Console.WriteLine($"[OperatorSim] CREATE CONFIRMED id={ping.Id}");
+    Console.WriteLine($"[OperatorSim] CREATE CONFIRMED id={ping.OverlayId}");
 
     if (scenario == "restart-watch")
     {
@@ -106,15 +106,15 @@ try
 
     if (scenario == "seed-only")
     {
-        Console.WriteLine($"[OperatorSim] SEED CONFIRMED id={ping.Id}");
+        Console.WriteLine($"[OperatorSim] SEED CONFIRMED id={ping.OverlayId}");
         Console.WriteLine("[PASS] Operator seed state left authoritative at relay.");
         return;
     }
 
-    await client.RemoveMarkerAsync(ping.Id, cts.Token);
-    Console.WriteLine($"[OperatorSim] REMOVE SENT id={ping.Id}");
+    await client.RemoveMarkerAsync(ping.OverlayId, cts.Token);
+    Console.WriteLine($"[OperatorSim] REMOVE SENT id={ping.OverlayId}");
     await removed.Task.WaitAsync(TimeSpan.FromSeconds(8));
-    Console.WriteLine($"[OperatorSim] REMOVE CONFIRMED id={ping.Id}");
+    Console.WriteLine($"[OperatorSim] REMOVE CONFIRMED id={ping.OverlayId}");
     Console.WriteLine("[PASS] Operator relay client lifecycle passed.");
 }
 finally

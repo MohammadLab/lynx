@@ -44,22 +44,25 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Arrangement
 import com.sentinelsystems.hud.model.Ping
+import com.sentinelsystems.hud.model.Overlay
+import com.sentinelsystems.hud.model.OverlayKinds
+import com.sentinelsystems.hud.model.SharedPoint
 import com.sentinelsystems.hud.identity.ClientIdentityStore
 import com.sentinelsystems.hud.calibration.BeaconDetector
 import com.sentinelsystems.hud.calibration.Calibration
 import com.sentinelsystems.hud.calibration.CalibrationAttempt
 import com.sentinelsystems.hud.calibration.Vec3
 import com.sentinelsystems.hud.calibration.RemotePingProjector
-import com.sentinelsystems.hud.protocol.pingCreateToJson
-import com.sentinelsystems.hud.protocol.pingRemoveToJson
+import com.sentinelsystems.hud.calibration.RemoteOverlayProjector
+import com.sentinelsystems.hud.protocol.overlayCreateToJson
+import com.sentinelsystems.hud.protocol.overlayRemoveToJson
 import androidx.compose.runtime.rememberCoroutineScope
-import com.sentinelsystems.hud.network.UdpPingSender
-import com.sentinelsystems.hud.network.UdpPingReceiver
+import com.sentinelsystems.hud.network.UdpOverlayClient
 import com.sentinelsystems.hud.network.RelayDiscovery
 import com.sentinelsystems.hud.network.RelayEndpoint
-import com.sentinelsystems.hud.protocol.InboundMessage
-import com.sentinelsystems.hud.protocol.SnapshotAssembler
-import com.sentinelsystems.hud.protocol.SnapshotAssemblyStatus
+import com.sentinelsystems.hud.protocol.AuthoritativeOverlayState
+import com.sentinelsystems.hud.protocol.OverlayInboundMessage
+import com.sentinelsystems.hud.protocol.OverlayStateApplyStatus
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -106,8 +109,8 @@ fun ArScreen() {
         mutableStateListOf<Ping>()
     }
 
-    val remotePings = remember {
-        mutableStateMapOf<Long, Ping>()
+    val remoteOverlays = remember {
+        mutableStateMapOf<Long, Overlay>()
     }
 
     val remoteAnchors = remember {
@@ -189,10 +192,47 @@ fun ArScreen() {
 
     val currentCalibrationState = rememberUpdatedState(calibration)
     val currentSessionState = rememberUpdatedState(latestSession)
-    val snapshotAssembler = remember { SnapshotAssembler() }
-    var appliedStateEpoch by remember { mutableStateOf(0L) }
-    var appliedStateVersion by remember { mutableStateOf(0L) }
+    val authoritativeOverlayState = remember { AuthoritativeOverlayState() }
+    var activeOverlayClient by remember { mutableStateOf<UdpOverlayClient?>(null) }
     var receiverEpoch by remember { mutableStateOf(0) }
+
+    fun reconcileAuthoritativeOverlays(
+        overlays: List<Overlay>,
+        cal: Calibration?,
+        session: Session?
+    ) {
+        retireAllRemoteAnchors()
+        remoteOverlays.clear()
+
+        overlays.forEach { overlay ->
+            val isLiveLocalMarker =
+                overlay.ownerId == localSenderId &&
+                    pings.any { it.id == overlay.overlayId }
+
+            if (!isLiveLocalMarker) {
+                remoteOverlays[overlay.overlayId] = overlay
+            }
+
+            if (
+                isLiveLocalMarker ||
+                overlay.kind != OverlayKinds.MARKER ||
+                cal == null ||
+                session == null
+            ) return@forEach
+
+            val localPoints = RemoteOverlayProjector.projectPoints(
+                overlay,
+                cal
+            ) ?: return@forEach
+
+            val local = localPoints.singleOrNull() ?: return@forEach
+            remoteAnchors[overlay.overlayId] = registerRenderAnchor(
+                session.createAnchor(
+                    Pose.makeTranslation(local.x, local.y, local.z)
+                )
+            )
+        }
+    }
 
     LaunchedEffect(receiverEpoch) {
         val resolvedRelay = RelayDiscovery.resolve(
@@ -202,6 +242,7 @@ fun ArScreen() {
 
         if (resolvedRelay == null) {
             relayEndpoint = null
+            activeOverlayClient = null
             udpStatus = "DISCOVERY: relay not found; retrying"
             delay(5_000)
             receiverEpoch++
@@ -211,196 +252,86 @@ fun ArScreen() {
         relayEndpoint = resolvedRelay
         udpStatus = "RELAY: ${resolvedRelay.host}:${resolvedRelay.port}"
 
-        val receiver = UdpPingReceiver(
+        val client = UdpOverlayClient(
             listenPort = receivePort,
             relayHost = resolvedRelay.host,
             relayPort = resolvedRelay.port,
             clientId = localSenderId
         )
+        activeOverlayClient = client
 
-        receiver.run(
-            onMessage = { message ->
-                withContext(Dispatchers.Main.immediate) {
-                    when (message) {
-                        is InboundMessage.PingCreate -> {
-                            val epoch = message.stateEpoch
-                            val version = message.stateVersion
-                            if (epoch != null && version != null) {
-                                if (
-                                    epoch < appliedStateEpoch ||
-                                    (epoch == appliedStateEpoch &&
-                                        version <= appliedStateVersion)
-                                ) {
-                                    udpStatus = "RX: stale create $epoch:$version ignored"
-                                    return@withContext
-                                }
-                                if (
-                                    epoch > appliedStateEpoch ||
-                                    version > appliedStateVersion + 1
-                                ) {
-                                    udpStatus =
-                                        "RX: version gap ${appliedStateEpoch}:${appliedStateVersion}" +
-                                            "->$epoch:$version; resync"
-                                    snapshotAssembler.reset()
-                                    receiverEpoch++
-                                    return@withContext
-                                }
+        try {
+            client.run(
+                onMessage = { message ->
+                    val result = authoritativeOverlayState.apply(message)
 
-                                appliedStateEpoch = epoch
-                                appliedStateVersion = version
+                    when (result.status) {
+                        OverlayStateApplyStatus.RESYNC_REQUIRED -> {
+                            authoritativeOverlayState.resetPendingSnapshot()
+                            client.requestSnapshot()
+                            withContext(Dispatchers.Main.immediate) {
+                                udpStatus =
+                                    "RX: overlay gap at " +
+                                        "${authoritativeOverlayState.appliedEpoch}:" +
+                                        "${authoritativeOverlayState.appliedVersion}; resync"
                             }
-
-                            val ping = message.ping
-                            val isLiveLocalPing =
-                                ping.senderId == localSenderId &&
-                                    pings.any { it.id == ping.id }
-
-                            if (isLiveLocalPing) {
-                                udpStatus = "RX: own ping ${ping.id} confirmed v${version ?: "-"}"
-                                return@withContext
-                            }
-
-                            val existing = remotePings[ping.id]
-                            if (existing == ping) {
-                                if (version != null) appliedStateVersion = version
-                                udpStatus = "RX: duplicate ${ping.id} ignored"
-                                return@withContext
-                            }
-
-                            remotePings[ping.id] = ping
-
-                            val cal = currentCalibrationState.value
-                            val session = currentSessionState.value
-                            if (cal == null || session == null) {
-                                udpStatus = "RX: ping ${ping.id} pending calibration v${version ?: "-"}"
-                                return@withContext
-                            }
-
-                            val projection = RemotePingProjector.project(ping, cal)
-                            if (projection == null) {
-                                udpStatus = "RX: frame mismatch b${ping.beaconId}"
-                                return@withContext
-                            }
-
-                            retireRemoteAnchor(ping.id)
-                            val local = projection.localPosition
-                            remoteAnchors[ping.id] = registerRenderAnchor(
-                                session.createAnchor(
-                                    Pose.makeTranslation(local.x, local.y, local.z)
-                                )
-                            )
-                            udpStatus = "RX: rendered ping ${ping.id} v${version ?: "-"}"
                         }
 
-                        is InboundMessage.PingRemove -> {
-                            val epoch = message.stateEpoch
-                            val version = message.stateVersion
-                            if (epoch != null && version != null) {
-                                if (
-                                    epoch < appliedStateEpoch ||
-                                    (epoch == appliedStateEpoch &&
-                                        version <= appliedStateVersion)
-                                ) {
-                                    udpStatus = "RX: stale remove $epoch:$version ignored"
-                                    return@withContext
-                                }
-                                if (
-                                    epoch > appliedStateEpoch ||
-                                    version > appliedStateVersion + 1
-                                ) {
-                                    udpStatus =
-                                        "RX: version gap ${appliedStateEpoch}:${appliedStateVersion}" +
-                                            "->$epoch:$version; resync"
-                                    snapshotAssembler.reset()
-                                    receiverEpoch++
-                                    return@withContext
-                                }
-
-                                appliedStateEpoch = epoch
-                                appliedStateVersion = version
+                        OverlayStateApplyStatus.STALE_IGNORED -> {
+                            withContext(Dispatchers.Main.immediate) {
+                                udpStatus = "RX: stale overlay packet ignored"
                             }
-
-                            val isLiveLocalPing =
-                                message.senderId == localSenderId &&
-                                    pings.any { it.id == message.pingId }
-
-                            if (isLiveLocalPing) {
-                                udpStatus = "RX: own remove ${message.pingId} confirmed v${version ?: "-"}"
-                                return@withContext
-                            }
-
-                            remotePings.remove(message.pingId)
-                            retireRemoteAnchor(message.pingId)
-                            udpStatus = "RX: removed ping ${message.pingId} v${version ?: "-"}"
                         }
 
-                        is InboundMessage.SnapshotChunk -> {
-                            val result = snapshotAssembler.add(
-                                chunk = message,
-                                minimumStateEpoch = appliedStateEpoch,
-                                minimumStateVersion = appliedStateVersion
-                            )
-
-                            when (result.status) {
-                                SnapshotAssemblyStatus.STALE -> {
-                                    udpStatus = "RX: stale snapshot v${message.stateVersion} ignored"
-                                    return@withContext
-                                }
-                                SnapshotAssemblyStatus.CONFLICT -> {
-                                    udpStatus = "RX: snapshot conflict; resync"
-                                    snapshotAssembler.reset()
-                                    receiverEpoch++
-                                    return@withContext
-                                }
-                                SnapshotAssemblyStatus.INCOMPLETE -> {
-                                    udpStatus = "RX: snapshot ${message.chunkIndex + 1}/${message.chunkCount} v${message.stateVersion}"
-                                    return@withContext
-                                }
-                                SnapshotAssemblyStatus.COMPLETE -> Unit
-                            }
-
-                            retireAllRemoteAnchors()
-                            remotePings.clear()
-
-                            val cal = currentCalibrationState.value
-                            val session = currentSessionState.value
-                            result.pings.orEmpty().forEach { ping ->
-                                val isLiveLocalPing =
-                                    ping.senderId == localSenderId &&
-                                        pings.any { it.id == ping.id }
-                                if (isLiveLocalPing) return@forEach
-
-                                remotePings[ping.id] = ping
-                                if (cal != null && session != null) {
-                                    val projection = RemotePingProjector.project(ping, cal)
-                                    if (projection != null) {
-                                        val local = projection.localPosition
-                                        remoteAnchors[ping.id] = registerRenderAnchor(
-                                            session.createAnchor(
-                                                Pose.makeTranslation(local.x, local.y, local.z)
-                                            )
-                                        )
-                                    }
+                        OverlayStateApplyStatus.SNAPSHOT_INCOMPLETE -> {
+                            val chunk = message as? OverlayInboundMessage.SnapshotChunk
+                            withContext(Dispatchers.Main.immediate) {
+                                udpStatus = if (chunk == null) {
+                                    "RX: overlay snapshot incomplete"
+                                } else {
+                                    "RX: overlay snapshot " +
+                                        "${chunk.chunkIndex + 1}/${chunk.chunkCount} " +
+                                        "v${chunk.stateVersion}"
                                 }
                             }
-
-                            appliedStateEpoch =
-                                result.stateEpoch ?: appliedStateEpoch
-                            appliedStateVersion =
-                                result.stateVersion ?: appliedStateVersion
-                            udpStatus =
-                                "RX: snapshot ${remotePings.size} ping(s) " +
-                                    "e$appliedStateEpoch v$appliedStateVersion"
                         }
+
+                        OverlayStateApplyStatus.SNAPSHOT_APPLIED,
+                        OverlayStateApplyStatus.APPLIED -> {
+                            if (result.stateChanged ||
+                                result.status == OverlayStateApplyStatus.SNAPSHOT_APPLIED
+                            ) {
+                                withContext(Dispatchers.Main.immediate) {
+                                    reconcileAuthoritativeOverlays(
+                                        authoritativeOverlayState.snapshot(),
+                                        currentCalibrationState.value,
+                                        currentSessionState.value
+                                    )
+                                }
+                            }
+
+                            withContext(Dispatchers.Main.immediate) {
+                                udpStatus =
+                                    "RX: overlays ${authoritativeOverlayState.snapshot().size} " +
+                                        "e${authoritativeOverlayState.appliedEpoch} " +
+                                        "v${authoritativeOverlayState.appliedVersion}"
+                            }
+                        }
+
+                        OverlayStateApplyStatus.IGNORED -> Unit
+                    }
+                },
+                onStatus = { status ->
+                    withContext(Dispatchers.Main.immediate) {
+                        udpStatus = status
                     }
                 }
-            },
-            onStatus = { status ->
-                withContext(Dispatchers.Main.immediate) {
-                    udpStatus = status
-                }
+            )
+        } finally {
+            if (activeOverlayClient === client) {
+                activeOverlayClient = null
             }
-        )
+        }
     }
 
     Box(
@@ -448,7 +379,7 @@ fun ArScreen() {
         ) {
             Column {
                 Text(
-                    text = "LYNX  •  PROTOTYPE 0.4",
+                    text = "LYNX  •  PROTOTYPE 0.6",
                     color = Color.White,
                     fontSize = 14.sp
                 )
@@ -488,8 +419,8 @@ fun ArScreen() {
                     fontSize = 13.sp
                 )
                 Text(
-                    text = "REMOTE  ${remotePings.size} ping(s)  " +
-                        "${remotePings.keys.count { remoteAnchors.containsKey(it) }} rendered",
+                    text = "OVERLAYS ${remoteOverlays.size} remote  " +
+                        "${remoteAnchors.size} marker(s) rendered",
                     color = Color.White,
                     fontSize = 13.sp
                 )
@@ -545,22 +476,11 @@ fun ArScreen() {
                         calibration = built
                         calibrationStatus = "READY  •  BEACON ${built.beaconId}"
 
-                        retireAllRemoteAnchors()
-
-                        val session = latestSession
-                        if (session != null) {
-                            remotePings.values.forEach { ping ->
-                                val projection = RemotePingProjector.project(ping, built)
-                                    ?: return@forEach
-
-                                val local = projection.localPosition
-                                remoteAnchors[ping.id] = registerRenderAnchor(
-                                    session.createAnchor(
-                                        Pose.makeTranslation(local.x, local.y, local.z)
-                                    )
-                                )
-                            }
-                        }
+                        reconcileAuthoritativeOverlays(
+                            authoritativeOverlayState.snapshot(),
+                            built,
+                            latestSession
+                        )
                     } catch (e: Exception) {
                         Log.e("LynxCalibration", "Calibration failed", e)
                         calibrationStatus =
@@ -663,24 +583,28 @@ fun ArScreen() {
 
                     lastPing = ping
 
-                    val json = pingCreateToJson(ping)
+                    val json = overlayCreateToJson(
+                        overlayId = ping.id,
+                        senderId = ping.senderId,
+                        beaconId = ping.beaconId,
+                        kind = OverlayKinds.MARKER,
+                        geometry = listOf(
+                            SharedPoint(ping.x, ping.y, ping.z)
+                        ),
+                        createdAt = ping.createdAt
+                    )
                     lastPingJson = json
 
                     coroutineScope.launch {
-                        val endpoint = relayEndpoint
-                        if (endpoint == null) {
-                            udpStatus = "UDP: relay unavailable"
+                        val client = activeOverlayClient
+                        if (client == null) {
+                            udpStatus = "UDP: overlay client unavailable"
                             return@launch
                         }
 
                         try {
-                            UdpPingSender.send(
-                                json = json,
-                                host = endpoint.host,
-                                port = endpoint.port
-                            )
-
-                            udpStatus = "UDP: shared ping sent"
+                            client.sendCommand(json)
+                            udpStatus = "UDP: marker overlay command sent"
                         } catch (e: Exception) {
                             udpStatus = "UDP ERROR: ${e.message}"
                         }
@@ -703,25 +627,28 @@ fun ArScreen() {
                     lastPingJson = null
 
                     coroutineScope.launch {
-                        val endpoint = relayEndpoint
-                        if (endpoint == null) {
-                            udpStatus = "UDP: relay unavailable"
+                        val client = activeOverlayClient
+                        if (client == null) {
+                            udpStatus = "UDP: overlay client unavailable"
                             return@launch
                         }
 
                         try {
+                            var commands = 0
                             pingsToRemove.forEach { ping ->
-                                UdpPingSender.send(
-                                    json = pingRemoveToJson(
-                                        pingId = ping.id,
-                                        senderId = ping.senderId
-                                    ),
-                                    host = endpoint.host,
-                                    port = endpoint.port
+                                val overlay = authoritativeOverlayState.get(ping.id)
+                                    ?: return@forEach
+                                client.sendCommand(
+                                    overlayRemoveToJson(
+                                        overlayId = overlay.overlayId,
+                                        senderId = localSenderId,
+                                        expectedRevision = overlay.revision
+                                    )
                                 )
+                                commands++
                             }
 
-                            udpStatus = "UDP: removed ${pingsToRemove.size}"
+                            udpStatus = "UDP: remove commands $commands/${pingsToRemove.size}"
                         } catch (e: Exception) {
                             udpStatus = "UDP ERROR: ${e.message}"
                         }

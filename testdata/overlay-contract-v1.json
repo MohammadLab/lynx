@@ -1,0 +1,1 @@
+{"type":"OVERLAY_DIFF","overlayId":42,"operation":"UPSERT","revision":3,"overlay":{"overlayId":42,"ownerId":700,"beaconId":0,"kind":"PATH","revision":3,"geometry":[{"x":0.0,"y":0.0,"z":0.0},{"x":1.5,"y":0.0,"z":2.0},{"x":3.0,"y":0.0,"z":2.5}],"createdAt":1800000000000,"updatedAt":1800000000500},"stateEpoch":900,"stateVersion":12}

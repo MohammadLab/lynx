@@ -1,6 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
-using System.Security.Cryptography;
+using System.Text.Json;
 using Lynx.Protocol;
 
 namespace Lynx.Operator.Core;
@@ -17,8 +17,7 @@ public sealed record OperatorRelayClientOptions(
 public sealed class OperatorRelayClient : IAsyncDisposable
 {
     private const int MaxPayloadBytes = 4096;
-
-    private readonly AuthoritativePingState _state = new();
+    private readonly AuthoritativeOverlayState _state = new();
     private readonly SemaphoreSlim _sendGate = new(1, 1);
     private readonly object _socketLock = new();
     private readonly object _snapshotReceiptLock = new();
@@ -26,6 +25,7 @@ public sealed class OperatorRelayClient : IAsyncDisposable
     private UdpClient? _socket;
     private IPEndPoint? _relayEndpoint;
     private long? _pendingSnapshotId;
+    private bool _initialOverlaySnapshotPending;
     private int _pendingSnapshotChunkCount;
     private readonly HashSet<int> _receivedSnapshotChunks = new();
     private DateTimeOffset? _snapshotDeadlineUtc;
@@ -38,7 +38,6 @@ public sealed class OperatorRelayClient : IAsyncDisposable
     }
 
     public long ClientId { get; }
-
     public long AppliedEpoch => _state.AppliedEpoch;
     public long AppliedVersion => _state.AppliedVersion;
 
@@ -50,25 +49,22 @@ public sealed class OperatorRelayClient : IAsyncDisposable
             {
                 return _relayEndpoint is null
                     ? null
-                    : new RelayEndpoint(
-                        _relayEndpoint.Address.ToString(),
-                        _relayEndpoint.Port);
+                    : new RelayEndpoint(_relayEndpoint.Address.ToString(), _relayEndpoint.Port);
             }
         }
     }
 
     public event Action<string>? StatusChanged;
     public event Action<RelayEndpoint?>? RelayEndpointChanged;
-    public event Action<IReadOnlyList<PingMessage>, long, long>? StateChanged;
+    public event Action<IReadOnlyList<OverlayMessage>, long, long>? StateChanged;
 
-    public IReadOnlyList<PingMessage> StateSnapshot() => _state.Snapshot();
+    public IReadOnlyList<OverlayMessage> StateSnapshot() => _state.Snapshot();
 
     public async Task RunAsync(
         OperatorRelayClientOptions options,
         CancellationToken cancellationToken)
     {
         ValidateOptions(options);
-
         var discoveryTimeout = options.DiscoveryTimeout ?? TimeSpan.FromSeconds(2);
         var retryDelay = options.RetryDelay ?? TimeSpan.FromSeconds(2);
 
@@ -78,10 +74,7 @@ public sealed class OperatorRelayClient : IAsyncDisposable
             {
                 SetStatus($"Resolving relay {options.RelayHost}:{options.RelayPort}...");
                 var resolved = await RelayEndpointResolver.ResolveAsync(
-                    options.RelayHost,
-                    options.RelayPort,
-                    discoveryTimeout,
-                    cancellationToken);
+                    options.RelayHost, options.RelayPort, discoveryTimeout, cancellationToken);
 
                 if (resolved is null)
                 {
@@ -90,10 +83,7 @@ public sealed class OperatorRelayClient : IAsyncDisposable
                     continue;
                 }
 
-                await RunConnectedSessionAsync(
-                    resolved,
-                    options,
-                    cancellationToken);
+                await RunConnectedSessionAsync(resolved, options, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -110,55 +100,82 @@ public sealed class OperatorRelayClient : IAsyncDisposable
         SetStatus("Stopped.");
     }
 
-    public async Task<PingMessage> CreateMarkerAsync(
+    public Task<OverlayCommandPreview> CreateMarkerAsync(
         SharedPoint shared,
+        int beaconId = 0,
+        CancellationToken cancellationToken = default) =>
+        CreateOverlayAsync(
+            OverlayKinds.Marker,
+            new[] { new SharedPointMessage((float)shared.X, (float)shared.Y, (float)shared.Z) },
+            beaconId,
+            cancellationToken);
+
+    public async Task<OverlayCommandPreview> CreateOverlayAsync(
+        string kind,
+        IReadOnlyList<SharedPointMessage> geometry,
         int beaconId = 0,
         CancellationToken cancellationToken = default)
     {
-        if (!double.IsFinite(shared.X) ||
-            !double.IsFinite(shared.Y) ||
-            !double.IsFinite(shared.Z))
-            throw new ArgumentOutOfRangeException(nameof(shared));
+        if (!OverlayValidation.ValidateGeometry(kind, geometry, out var error))
+            throw new ArgumentException(error, nameof(geometry));
+        if (beaconId < 0)
+            throw new ArgumentOutOfRangeException(nameof(beaconId));
 
-        var ping = new PingMessage(
-            Id: CreatePositiveRandomId(),
-            SenderId: ClientId,
-            BeaconId: beaconId,
-            X: checked((float)shared.X),
-            Y: checked((float)shared.Y),
-            Z: checked((float)shared.Z),
-            CreatedAt: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-
-        await SendMessageAsync(
-            LynxMessageCodec.CreatePing(ping),
+        var id = PositiveIdGenerator.Next();
+        var createdAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        await SendOverlayMessageAsync(
+            OverlayWireCodec.CreateCommand(
+                id, ClientId, beaconId, kind, geometry, createdAt),
             cancellationToken);
 
-        return ping;
+        return new OverlayCommandPreview(
+            id, ClientId, beaconId, kind, geometry.ToArray(), createdAt);
     }
 
-    public async Task RemoveMarkerAsync(
-        long pingId,
+    public async Task UpdateOverlayAsync(
+        long overlayId,
+        IReadOnlyList<SharedPointMessage> geometry,
         CancellationToken cancellationToken = default)
     {
-        if (!_state.TryGet(pingId, out var ping) || ping is null)
-            throw new InvalidOperationException($"Ping {pingId} is not in authoritative state.");
+        if (!_state.TryGet(overlayId, out var overlay) || overlay is null)
+            throw new InvalidOperationException($"Overlay {overlayId} is not in authoritative state.");
+        if (overlay.OwnerId != ClientId)
+            throw new InvalidOperationException("This operator does not own the overlay.");
+        if (!OverlayValidation.ValidateGeometry(overlay.Kind, geometry, out var error))
+            throw new ArgumentException(error, nameof(geometry));
 
-        if (ping.SenderId != ClientId)
-            throw new InvalidOperationException(
-                "Prototype 0.5 can remove only markers owned by this operator client.");
-
-        await SendMessageAsync(
-            LynxMessageCodec.RemovePing(pingId, ClientId),
+        await SendOverlayMessageAsync(
+            OverlayWireCodec.UpdateCommand(
+                overlayId, ClientId, overlay.Revision, overlay.Kind, geometry),
             cancellationToken);
     }
 
-    public async Task RequestSnapshotAsync(
+    public async Task RemoveOverlayAsync(
+        long overlayId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_state.TryGet(overlayId, out var overlay) || overlay is null)
+            throw new InvalidOperationException($"Overlay {overlayId} is not in authoritative state.");
+        if (overlay.OwnerId != ClientId)
+            throw new InvalidOperationException("This operator does not own the overlay.");
+
+        await SendOverlayMessageAsync(
+            OverlayWireCodec.RemoveCommand(overlayId, ClientId, overlay.Revision),
+            cancellationToken);
+    }
+
+    public Task RemoveMarkerAsync(
+        long overlayId,
+        CancellationToken cancellationToken = default) =>
+        RemoveOverlayAsync(overlayId, cancellationToken);
+
+    public async Task RequestOverlaySnapshotAsync(
         CancellationToken cancellationToken = default)
     {
         _state.ResetPendingSnapshot();
         ResetSnapshotReceipt();
-        await SendMessageAsync(
-            LynxMessageCodec.RequestSnapshot(ClientId),
+        await SendOverlayMessageAsync(
+            OverlayWireCodec.RequestSnapshot(ClientId),
             cancellationToken);
     }
 
@@ -169,18 +186,16 @@ public sealed class OperatorRelayClient : IAsyncDisposable
     {
         using var socket = new UdpClient(new IPEndPoint(IPAddress.Any, 0));
         socket.Client.ReceiveBufferSize = 64 * 1024;
-
         SetSocket(socket, relay.ToIPEndPoint());
-        SetStatus($"Relay {relay.Host}:{relay.Port}; registering client {ClientId}.");
-        await SendMessageAsync(
-            LynxMessageCodec.RegisterClient(ClientId),
-            cancellationToken);
 
-        using var maintenanceCts =
-            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var maintenanceTask = MaintenanceLoopAsync(
-            options,
-            maintenanceCts.Token);
+        SetStatus($"Relay {relay.Host}:{relay.Port}; registering client {ClientId}.");
+        await SendLegacyMessageAsync(
+            LynxMessageCodec.RegisterClient(ClientId), cancellationToken);
+        _initialOverlaySnapshotPending = true;
+        await RequestOverlaySnapshotAsync(cancellationToken);
+
+        using var maintenanceCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var maintenanceTask = MaintenanceLoopAsync(options, maintenanceCts.Token);
 
         try
         {
@@ -204,64 +219,77 @@ public sealed class OperatorRelayClient : IAsyncDisposable
                     continue;
                 }
 
-                if (!LynxMessageCodec.TryParse(
-                        received.Buffer,
-                        out var message,
-                        out var error) ||
-                    message is null)
+                var type = ReadMessageType(received.Buffer);
+                if (type is null) continue;
+
+                if (IsOverlayType(type))
                 {
-                    SetStatus($"Dropped invalid relay payload: {error}");
+                    if (!OverlayWireCodec.TryParse(received.Buffer, out var message, out var error) || message is null)
+                    {
+                        SetStatus($"Dropped invalid overlay payload: {error}");
+                        continue;
+                    }
+                    await HandleOverlayInboundAsync(message, options, cancellationToken);
                     continue;
                 }
 
-                TrackSnapshotReceipt(message, options);
-
-                var result = _state.Apply(message);
-                switch (result.Status)
+                // Legacy snapshots are retained only as restart-registration signals.
+                if (type == LynxMessageTypes.Snapshot &&
+                    !_initialOverlaySnapshotPending &&
+                    LynxMessageCodec.TryParse(received.Buffer, out var legacy, out _) &&
+                    legacy?.StateEpoch is long legacyEpoch &&
+                    legacyEpoch > _state.AppliedEpoch)
                 {
-                    case StateApplyStatus.ResyncRequired:
-                        SetStatus(
-                            $"State gap/conflict at {_state.AppliedEpoch}:{_state.AppliedVersion}; requesting snapshot.");
-                        await RequestSnapshotAsync(cancellationToken);
-                        break;
-
-                    case StateApplyStatus.SnapshotIncomplete:
-                        SetStatus(
-                            $"Snapshot chunk {message.ChunkIndex!.Value + 1}/{message.ChunkCount} received.");
-                        break;
-
-                    case StateApplyStatus.SnapshotApplied:
-                        ResetSnapshotReceipt();
-                        SetStatus(
-                            $"Snapshot applied: {_state.Snapshot().Count} marker(s), " +
-                            $"epoch {_state.AppliedEpoch}, version {_state.AppliedVersion}.");
-                        RaiseStateChanged();
-                        break;
-
-                    case StateApplyStatus.Applied:
-                        SetStatus(
-                            $"Authoritative update applied at " +
-                            $"{_state.AppliedEpoch}:{_state.AppliedVersion}.");
-                        RaiseStateChanged();
-                        break;
-
-                    case StateApplyStatus.StaleIgnored:
-                        SetStatus("Stale/duplicate authoritative packet ignored.");
-                        break;
+                    SetStatus("Relay epoch changed; requesting generalized overlay snapshot.");
+                    await RequestOverlaySnapshotAsync(cancellationToken);
                 }
             }
         }
         finally
         {
             maintenanceCts.Cancel();
-            try
-            {
-                await maintenanceTask;
-            }
-            catch (OperationCanceledException)
-            {
-            }
+            try { await maintenanceTask; } catch (OperationCanceledException) { }
             ClearSocket(socket);
+        }
+    }
+
+    private async Task HandleOverlayInboundAsync(
+        OverlayWireMessage message,
+        OperatorRelayClientOptions options,
+        CancellationToken cancellationToken)
+    {
+        TrackSnapshotReceipt(message, options);
+        var result = _state.Apply(message);
+
+        switch (result.Status)
+        {
+            case OverlayStateApplyStatus.ResyncRequired:
+                SetStatus(
+                    $"Overlay state gap/conflict at {_state.AppliedEpoch}:{_state.AppliedVersion}; resync.");
+                await RequestOverlaySnapshotAsync(cancellationToken);
+                break;
+
+            case OverlayStateApplyStatus.SnapshotIncomplete:
+                SetStatus($"Overlay snapshot chunk {message.ChunkIndex!.Value + 1}/{message.ChunkCount} received.");
+                break;
+
+            case OverlayStateApplyStatus.SnapshotApplied:
+                _initialOverlaySnapshotPending = false;
+                ResetSnapshotReceipt();
+                SetStatus(
+                    $"Overlay snapshot applied: {_state.Snapshot().Count} object(s), " +
+                    $"epoch {_state.AppliedEpoch}, version {_state.AppliedVersion}.");
+                RaiseStateChanged();
+                break;
+
+            case OverlayStateApplyStatus.Applied:
+                SetStatus($"Overlay diff applied at {_state.AppliedEpoch}:{_state.AppliedVersion}.");
+                if (result.StateChanged) RaiseStateChanged();
+                break;
+
+            case OverlayStateApplyStatus.StaleIgnored:
+                SetStatus("Stale/duplicate overlay packet ignored.");
+                break;
         }
     }
 
@@ -282,9 +310,8 @@ public sealed class OperatorRelayClient : IAsyncDisposable
             {
                 try
                 {
-                    await SendMessageAsync(
-                        LynxMessageCodec.Heartbeat(ClientId),
-                        cancellationToken);
+                    await SendLegacyMessageAsync(
+                        LynxMessageCodec.Heartbeat(ClientId), cancellationToken);
                 }
                 catch (InvalidOperationException)
                 {
@@ -293,34 +320,32 @@ public sealed class OperatorRelayClient : IAsyncDisposable
                 nextHeartbeat = now + heartbeatInterval;
             }
 
-            var timedOut = false;
+            bool timedOut;
             lock (_snapshotReceiptLock)
             {
                 timedOut = _pendingSnapshotId is not null &&
-                    _snapshotDeadlineUtc is not null &&
-                    now >= _snapshotDeadlineUtc;
+                    _snapshotDeadlineUtc is not null && now >= _snapshotDeadlineUtc;
             }
 
             if (timedOut)
             {
-                SetStatus($"Snapshot incomplete after {snapshotTimeout.TotalSeconds:0.#}s; requesting fresh snapshot.");
-                await RequestSnapshotAsync(cancellationToken);
+                SetStatus($"Overlay snapshot incomplete after {snapshotTimeout.TotalSeconds:0.#}s; resync.");
+                await RequestOverlaySnapshotAsync(cancellationToken);
             }
         }
     }
 
     private void TrackSnapshotReceipt(
-        LynxMessage message,
+        OverlayWireMessage message,
         OperatorRelayClientOptions options)
     {
-        if (message.Type != LynxMessageTypes.Snapshot ||
+        if (message.Type != OverlayMessageTypes.Snapshot ||
             message.SnapshotId is null ||
             message.ChunkIndex is null ||
             message.ChunkCount is null)
             return;
 
-        var snapshotTimeout = options.SnapshotTimeout ?? TimeSpan.FromSeconds(3);
-
+        var timeout = options.SnapshotTimeout ?? TimeSpan.FromSeconds(3);
         lock (_snapshotReceiptLock)
         {
             if (_pendingSnapshotId != message.SnapshotId)
@@ -328,7 +353,7 @@ public sealed class OperatorRelayClient : IAsyncDisposable
                 _pendingSnapshotId = message.SnapshotId;
                 _pendingSnapshotChunkCount = message.ChunkCount.Value;
                 _receivedSnapshotChunks.Clear();
-                _snapshotDeadlineUtc = DateTimeOffset.UtcNow + snapshotTimeout;
+                _snapshotDeadlineUtc = DateTimeOffset.UtcNow + timeout;
             }
 
             _receivedSnapshotChunks.Add(message.ChunkIndex.Value);
@@ -337,31 +362,32 @@ public sealed class OperatorRelayClient : IAsyncDisposable
         }
     }
 
-    private async Task SendMessageAsync(
+    private async Task SendLegacyMessageAsync(
         LynxMessage message,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        await SendBytesAsync(LynxMessageCodec.Serialize(message), cancellationToken);
+
+    private async Task SendOverlayMessageAsync(
+        OverlayWireMessage message,
+        CancellationToken cancellationToken) =>
+        await SendBytesAsync(OverlayWireCodec.Serialize(message), cancellationToken);
+
+    private async Task SendBytesAsync(byte[] payload, CancellationToken cancellationToken)
     {
         UdpClient socket;
         IPEndPoint endpoint;
         lock (_socketLock)
         {
             socket = _socket ?? throw new InvalidOperationException("Relay is not connected.");
-            endpoint = _relayEndpoint ?? throw new InvalidOperationException("Relay endpoint is not available.");
+            endpoint = _relayEndpoint ?? throw new InvalidOperationException("Relay endpoint unavailable.");
         }
 
-        var payload = LynxMessageCodec.Serialize(message);
         if (payload.Length > MaxPayloadBytes)
             throw new InvalidOperationException("UDP payload exceeds prototype limit.");
 
         await _sendGate.WaitAsync(cancellationToken);
-        try
-        {
-            await socket.SendAsync(payload, endpoint, cancellationToken);
-        }
-        finally
-        {
-            _sendGate.Release();
-        }
+        try { await socket.SendAsync(payload, endpoint, cancellationToken); }
+        finally { _sendGate.Release(); }
     }
 
     private void SetSocket(UdpClient socket, IPEndPoint endpoint)
@@ -371,28 +397,23 @@ public sealed class OperatorRelayClient : IAsyncDisposable
             _socket = socket;
             _relayEndpoint = endpoint;
         }
-
-        RelayEndpointChanged?.Invoke(
-            new RelayEndpoint(endpoint.Address.ToString(), endpoint.Port));
+        RelayEndpointChanged?.Invoke(new RelayEndpoint(endpoint.Address.ToString(), endpoint.Port));
     }
 
     private void ClearSocket(UdpClient? expected = null)
     {
         lock (_socketLock)
         {
-            if (expected is not null && !ReferenceEquals(_socket, expected))
-                return;
+            if (expected is not null && !ReferenceEquals(_socket, expected)) return;
             _socket = null;
             _relayEndpoint = null;
         }
-
         RelayEndpointChanged?.Invoke(null);
     }
 
     private void ResetSnapshotReceipt()
     {
-        lock (_snapshotReceiptLock)
-            ResetSnapshotReceiptLocked();
+        lock (_snapshotReceiptLock) ResetSnapshotReceiptLocked();
     }
 
     private void ResetSnapshotReceiptLocked()
@@ -404,16 +425,22 @@ public sealed class OperatorRelayClient : IAsyncDisposable
     }
 
     private void RaiseStateChanged() =>
-        StateChanged?.Invoke(
-            _state.Snapshot(),
-            _state.AppliedEpoch,
-            _state.AppliedVersion);
+        StateChanged?.Invoke(_state.Snapshot(), _state.AppliedEpoch, _state.AppliedVersion);
 
-    private void SetStatus(string status) =>
-        StatusChanged?.Invoke(status);
+    private void SetStatus(string status) => StatusChanged?.Invoke(status);
 
-    private static long CreatePositiveRandomId() =>
-        PositiveIdGenerator.Next();
+    private static string? ReadMessageType(byte[] payload)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(payload);
+            return doc.RootElement.TryGetProperty("type", out var type) ? type.GetString() : null;
+        }
+        catch (JsonException) { return null; }
+    }
+
+    private static bool IsOverlayType(string type) =>
+        type is OverlayMessageTypes.Diff or OverlayMessageTypes.Snapshot;
 
     private static void ValidateOptions(OperatorRelayClientOptions options)
     {
