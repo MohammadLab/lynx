@@ -21,6 +21,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\protocol\Lynx.Protocol\Lynx.Protocol.csproj" />
     <ProjectReference Include="..\..\relay\Lynx.Relay.Core\Lynx.Relay.Core.csproj" />
+    <ProjectReference Include="..\..\desktop\Lynx.Operator.Core\Lynx.Operator.Core.csproj" />
   </ItemGroup>
 
 </Project>

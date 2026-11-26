@@ -62,6 +62,49 @@ Full Prototype 0.3 software verification:
 .\scripts\Test-Prototype03.ps1
 ```
 
+## Desktop operator (Prototype 0.5)
+
+The native WinUI 3 operator projects are:
+
+```text
+desktop/Lynx.Operator.Core
+desktop/Lynx.Operator
+```
+
+Requirements:
+- .NET 9 SDK.
+- Windows 10/11 SDK.
+- Windows App SDK / NuGet restore access.
+
+Build the operator:
+
+```powershell
+dotnet build .\desktop\Lynx.Operator\Lynx.Operator.csproj -p:Platform=x64
+```
+
+Run the complete Prototype 0.5 software verification:
+
+```powershell
+.\scripts\Test-Prototype05-All.ps1
+```
+
+Launch the relay and WinUI operator together:
+
+```powershell
+.\scripts\Run-Prototype05.ps1
+```
+
+The operator defaults to `127.0.0.1:7777` for a local relay. Enter `auto` in the Relay field or press **Auto** to use Lynx LAN discovery.
+
+Operator floorplan workflow:
+1. Load a PNG or JPEG.
+2. Start calibration.
+3. Click shared origin / AprilTag center.
+4. Click a +X reference and enter its known physical distance.
+5. Click the side representing positive shared +Z.
+6. Switch to Place Marker.
+7. Click the floorplan to send an authoritative shared-space marker.
+
 ## Network configuration
 
 Android now supports automatic relay discovery.
@@ -117,3 +160,26 @@ Include connected Android instrumentation:
 ```
 
 Hardware follow-up remains for a deferred-cleanup calibrated retest and a true two-Android-device shared-location test once a second ARCore device is available.
+
+Prototype 0.5 software scope: complete.
+
+Implemented:
+- native WinUI 3 desktop operator.
+- PNG/JPEG floorplan loading.
+- tested pan/zoom viewport transform.
+- reversible floorplan pixel <-> shared X/Z calibration.
+- three-click origin/+X/+Z calibration UI.
+- stable desktop operator identity.
+- relay discovery/register/heartbeat/snapshot recovery.
+- authoritative marker create/remove.
+- shared-state marker rendering back onto the floorplan.
+- desktop process reconnect and relay-restart recovery.
+- operator-to-independent-client propagation regression.
+
+Full verification:
+
+```powershell
+.\scripts\Test-Prototype05-All.ps1
+```
+
+Remaining Prototype 0.5 validation is physical only: use the WinUI floorplan and calibrated Android device against the same AprilTag frame and visually confirm the desktop-selected marker appears/disappears at the expected real-world location.

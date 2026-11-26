@@ -2,7 +2,16 @@
 
 ## Status
 
-Planned.
+Software-complete.
+
+All non-hardware Prototype 0.5 scope is implemented and passes the consolidated software verification suite.
+
+Remaining physical validation:
+- calibrate Android and the WinUI floorplan to the same AprilTag shared frame.
+- place a marker from the real WinUI floorplan and visually confirm the marker appears at the expected physical location in Android AR.
+- remove it from the WinUI operator and visually confirm it disappears from Android without a render crash.
+
+That physical test requires the tablet to be handled in the test area and is intentionally not claimed as complete while the operator is away from the device.
 
 ## Core goal
 
@@ -233,6 +242,73 @@ Prototype 0.5 is complete when all of the following are true:
 14. desktop reconnect and relay-restart recovery pass automated tests.
 15. Prototype 0.4 regression suite still passes unchanged.
 
+## Implemented software architecture
+
+### Desktop projects
+
+    desktop/Lynx.Operator.Core/
+    desktop/Lynx.Operator/
+
+`Lynx.Operator.Core` contains UI-independent engineering logic:
+- `FloorplanCalibration`: reversible pixel <-> shared X/Z transform.
+- `FloorplanViewportTransform`: aspect-fit, pan, zoom, and viewport/image conversion.
+- `AuthoritativePingState`: epoch/version/snapshot ordering rules.
+- `DesktopClientIdentityStore`: persistent random positive 63-bit operator identity.
+- `RelayEndpointResolver`: explicit host or Lynx auto-discovery.
+- `OperatorRelayClient`: register, heartbeat, snapshot assembly, snapshot timeout recovery, create/remove commands, reconnect, and relay-restart recovery.
+
+`Lynx.Operator` is the native unpackaged WinUI 3 workstation:
+- PNG/JPEG floorplan picker.
+- pan mode and cursor-centered mouse-wheel zoom.
+- three-click origin/+X/+Z calibration workflow.
+- known +X physical-distance input.
+- calibrated pixel/shared diagnostics.
+- authoritative marker list.
+- pending local command preview.
+- marker rendering derived from `sharedToPixel()`.
+- operator-owned authoritative remove.
+- relay host/port controls and auto-discovery option.
+- client ID, relay endpoint, epoch/version, and diagnostic status UI.
+
+### Test harness
+
+`tools/LynxOperatorSim` exercises the exact reusable desktop relay client without depending on WinUI interaction.
+
+It supports:
+- create/remove lifecycle.
+- seed-only state.
+- snapshot-only recovery.
+- relay-restart watch mode.
+
+## Software verification
+
+Primary command:
+
+    .\scripts\Test-Prototype05-All.ps1
+
+Verified in the closeout run:
+- 49/49 .NET tests passed.
+- WinUI operator built with 0 warnings and 0 errors.
+- actual WinUI executable stayed alive through startup smoke testing.
+- desktop auto-discovery/register/initial-snapshot passed.
+- operator authoritative create and remove echo passed.
+- desktop process restart recovered relay state from snapshot.
+- relay restart/new epoch reset desktop state correctly.
+- operator create/remove propagated to an independent registered viewer.
+- the complete Prototype 0.4 software verification suite still passed.
+
+Individual 0.5 regressions:
+- `Test-Prototype05-DesktopClient.ps1`.
+- `Test-Prototype05-DesktopReconnect.ps1`.
+- `Test-Prototype05-RelayRestart.ps1`.
+- `Test-Prototype05-OperatorToViewer.ps1`.
+
+Operational launcher:
+
+    .\scripts\Run-Prototype05.ps1
+
+The launcher builds the relay and WinUI operator, starts a local relay on UDP 7777 when one is not already bound, and launches the operator workstation.
+
 ## Automated test targets
 
 ### Pure calibration tests
@@ -332,16 +408,18 @@ After the core C2 workflow is correct:
 - degraded-network/stress layer.
 - HUD simplification and operational behavior.
 
-## First implementation checkpoint
+## Implementation sequence completed
 
-Do not begin with the full UI.
+Prototype 0.5 was implemented in dependency order:
 
-The first 0.5 coding checkpoint should be:
+1. pure `FloorplanCalibration` and geometry model.
+2. floorplan viewport/pan/zoom transform.
+3. unit tests for reversible spatial math and invalid geometry.
+4. authoritative desktop state engine.
+5. stable desktop identity and relay discovery.
+6. reusable UDP operator client.
+7. headless operator network harness and regressions.
+8. native WinUI 3 operator shell and floorplan interaction.
+9. full 0.5 software closeout suite.
 
-    pure FloorplanCalibration math model
-    + unit tests
-    + no WinUI dependency
-
-Only after the transform is mathematically proven should we build the operator viewport around it.
-
-That keeps spatial correctness testable independently from Windows UI behavior.
+This preserved the intended separation between spatial correctness, distributed-state correctness, and UI behavior.

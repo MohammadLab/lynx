@@ -46,7 +46,19 @@ Console.WriteLine();
 
 while (true)
 {
-    var received = await udp.ReceiveAsync();
+    UdpReceiveResult received;
+    try
+    {
+        received = await udp.ReceiveAsync();
+    }
+    catch (SocketException ex)
+    {
+        Console.WriteLine(
+            $"[Relay] Transient UDP receive error {ex.SocketErrorCode}; continuing.");
+        await Task.Delay(100);
+        continue;
+    }
+
     var payload = received.Buffer;
     var from = received.RemoteEndPoint;
     var now = DateTimeOffset.UtcNow;
