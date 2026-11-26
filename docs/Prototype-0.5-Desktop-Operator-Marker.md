@@ -286,8 +286,12 @@ Primary command:
 
     .\scripts\Test-Prototype05-All.ps1
 
+With the Android tablet connected through ADB:
+
+    .\scripts\Test-Prototype05-All.ps1 -ConnectedAndroid
+
 Verified in the closeout run:
-- 49/49 .NET tests passed.
+- 50/50 .NET tests passed.
 - WinUI operator built with 0 warnings and 0 errors.
 - actual WinUI executable stayed alive through startup smoke testing.
 - desktop auto-discovery/register/initial-snapshot passed.
@@ -295,6 +299,9 @@ Verified in the closeout run:
 - desktop process restart recovered relay state from snapshot.
 - relay restart/new epoch reset desktop state correctly.
 - operator create/remove propagated to an independent registered viewer.
+- a shared cross-platform spatial-contract fixture is consumed by both C# and Kotlin tests.
+- the same shared -> Android-local projection contract passed on the physical SM-X800 through Android instrumentation.
+- all 9 Android instrumentation tests passed on the SM-X800.
 - the complete Prototype 0.4 software verification suite still passed.
 
 Individual 0.5 regressions:

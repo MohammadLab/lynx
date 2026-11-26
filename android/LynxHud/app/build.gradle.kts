@@ -54,6 +54,11 @@ android {
         compose = true
         buildConfig = true
     }
+
+    sourceSets {
+        getByName("test").resources.srcDir("../../../testdata")
+        getByName("androidTest").assets.srcDir("../../../testdata")
+    }
 }
 
 dependencies {

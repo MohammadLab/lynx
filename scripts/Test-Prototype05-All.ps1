@@ -1,3 +1,7 @@
+param(
+    [switch]$ConnectedAndroid
+)
+
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 
@@ -51,7 +55,11 @@ foreach ($scriptName in $desktopRegressions) {
 }
 
 Run-Step "Prototype 0.4 regression suite" {
-    & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "Test-Prototype04-All.ps1")
+    if ($ConnectedAndroid) {
+        & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "Test-Prototype04-All.ps1") -ConnectedAndroid
+    } else {
+        & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "Test-Prototype04-All.ps1")
+    }
 }
 
 Write-Host ""
@@ -66,5 +74,9 @@ Write-Host "[PASS] Desktop process reconnect/snapshot recovery passed."
 Write-Host "[PASS] Desktop relay restart/new-epoch recovery passed."
 Write-Host "[PASS] Operator-to-independent-viewer propagation passed."
 Write-Host "[PASS] Prototype 0.4 regression suite still passes."
+Write-Host "[PASS] Shared spatial contract is checked by both C# and Kotlin unit tests."
+if ($ConnectedAndroid) {
+    Write-Host "[PASS] Shared spatial contract passed on the connected Android device."
+}
 Write-Host ""
-Write-Host "Physical Android calibrated floorplan-to-world validation remains hardware-only."
+Write-Host "Only real-room physical alignment/visual confirmation remains hardware-interaction dependent."
